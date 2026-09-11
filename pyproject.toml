@@ -7,6 +7,13 @@ name = "bio-geo-tagging"
 version = "0.1.0"
 description = "高中生物地理知识点打标项目"
 requires-python = ">=3.11"
+dependencies = [
+    "beautifulsoup4>=4.12",
+    "tqdm>=4.66",
+]
+
+[project.scripts]
+question-info-merge = "bio_geo_tagging.question_info_merge:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]

@@ -37,6 +37,19 @@ python -m pip install -e ".[dev]"
 pytest
 ```
 
+## 数据预处理
+
+题目清洗和大小题聚合命令：
+
+```powershell
+question-info-merge `
+  --input data/raw/geography.jsonl `
+  --output data/processed/geography-merged.jsonl `
+  --log-file runs/logs/geography-question-info-merge.log
+```
+
+该命令保持既有清洗和聚合规则，仅将输入、输出及日志路径改为运行时参数。
+
 ## 数据安全边界
 
 - 不向仓库提交真实题目、答案、解析和人工标注数据。
