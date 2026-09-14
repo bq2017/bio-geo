@@ -58,7 +58,9 @@ question-info-merge `
 label-definition-generate \
   --input-xlsx data/taxonomy/geography-knowledge-graph.xlsx \
   --output-jsonl runs/validation/label-definition-generation.jsonl \
-  --base-url http://172.22.0.35:9092/v1
+  --base-url http://172.22.0.35:9093/v1 \
+  --secondary-base-url http://172.22.0.35:9104/v1 \
+  --workers 4
 ```
 
 确认第一步全部完成后，第二步读取生成结果并与 Excel 中的现有释义比较：
@@ -71,7 +73,7 @@ label-definition-compare \
   --base-url http://172.22.0.35:9092/v1
 ```
 
-两个阶段的结果分别逐条追加到 JSONL，重复执行时会跳过该阶段已经成功完成的知识点。如果第一步存在缺失结果，第二步会直接停止并报告缺失数量。
+两个阶段的结果分别逐条追加到 JSONL，重复执行时会跳过该阶段已经成功完成的知识点。第一阶段可将工作线程平均分配到两个接口。如果第一步存在缺失结果，第二步会直接停止并报告缺失数量。
 第二阶段只输出是否存在实质理解差异、具体差异、是否需要教师复核和判断理由。
 
 ## 数据安全边界

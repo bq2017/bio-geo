@@ -3,7 +3,9 @@
 import argparse
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from openai import OpenAI
@@ -13,7 +15,7 @@ from tqdm import tqdm
 
 DEFAULT_SHEET = "知识点及试题量详情"
 DEFAULT_MODEL = "DeepSeek-V4-Flash"
-DEFAULT_BASE_URL = "http://172.22.0.35:9092/v1"
+DEFAULT_BASE_URL = "http://172.22.0.35:9093/v1"
 
 COLUMNS = {
     "full_path": "全路径知识点名称",
@@ -151,6 +153,7 @@ class DeepSeekValidator:
             max_retries=2,
         )
         self.model = model
+        self.base_url = base_url
 
     def request_json(
         self, messages: list[dict[str, str]], max_tokens: int
@@ -265,11 +268,14 @@ def load_completed_ids(output_jsonl: Path) -> set[str]:
 def run_generation(
     labels: list[dict[str, Any]],
     output_jsonl: str,
-    validator: DeepSeekValidator,
+    validators: list[DeepSeekValidator],
     model: str,
     limit: int | None,
 ) -> dict[str, int]:
-    """Generate interpretations serially and persist each result immediately."""
+    """Generate interpretations concurrently and persist each result immediately."""
+    if not validators:
+        raise ValueError("At least one validator is required")
+
     output_path = Path(output_jsonl)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     completed_ids = load_completed_ids(output_path)
@@ -283,36 +289,61 @@ def run_generation(
         "attempted": 0,
         "completed": 0,
         "errors": 0,
+        "workers": min(len(validators), len(pending)),
     }
 
-    with output_path.open("a", encoding="utf-8") as output_stream:
-        for label in tqdm(pending, desc="Generating interpretations"):
-            summary["attempted"] += 1
-            try:
-                generated = validator.generate(label["full_path"])
-                record = {
-                    "source_row": label["source_row"],
-                    "label_id": label["label_id"],
-                    "full_path": label["full_path"],
-                    "generated_interpretation": generated,
-                    "model": model,
-                    "status": "completed",
-                }
-                summary["completed"] += 1
-            except Exception as error:
-                record = {
-                    "source_row": label["source_row"],
-                    "label_id": label["label_id"],
-                    "full_path": label["full_path"],
-                    "model": model,
-                    "status": "error",
-                    "error_type": type(error).__name__,
-                    "error": str(error),
-                }
-                summary["errors"] += 1
+    write_lock = Lock()
 
-            output_stream.write(json.dumps(record, ensure_ascii=False) + "\n")
-            output_stream.flush()
+    with (
+        output_path.open("a", encoding="utf-8") as output_stream,
+        tqdm(total=len(pending), desc="Generating interpretations") as progress,
+    ):
+
+        def process_batch(
+            validator: DeepSeekValidator, batch: list[dict[str, Any]]
+        ) -> None:
+            for label in batch:
+                endpoint = getattr(validator, "base_url", "")
+                try:
+                    generated = validator.generate(label["full_path"])
+                    record = {
+                        "source_row": label["source_row"],
+                        "label_id": label["label_id"],
+                        "full_path": label["full_path"],
+                        "generated_interpretation": generated,
+                        "model": model,
+                        "endpoint": endpoint,
+                        "status": "completed",
+                    }
+                    succeeded = True
+                except Exception as error:
+                    record = {
+                        "source_row": label["source_row"],
+                        "label_id": label["label_id"],
+                        "full_path": label["full_path"],
+                        "model": model,
+                        "endpoint": endpoint,
+                        "status": "error",
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                    }
+                    succeeded = False
+
+                with write_lock:
+                    summary["attempted"] += 1
+                    summary["completed" if succeeded else "errors"] += 1
+                    output_stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    output_stream.flush()
+                    progress.update(1)
+
+        with ThreadPoolExecutor(max_workers=len(validators)) as executor:
+            futures = [
+                executor.submit(process_batch, validator, pending[index::len(validators)])
+                for index, validator in enumerate(validators)
+                if pending[index::len(validators)]
+            ]
+            for future in futures:
+                future.result()
 
     return summary
 
@@ -449,17 +480,35 @@ def generate_main() -> None:
     """Run the independent interpretation generation stage."""
     parser = build_common_parser("Generate interpretations from label paths.")
     parser.add_argument("--output-jsonl", required=True, help="Generation results")
+    parser.add_argument(
+        "--secondary-base-url",
+        help="Optional second OpenAI-compatible API base URL",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Total generation workers distributed across the API endpoints",
+    )
     arguments = parser.parse_args()
     validate_limit(arguments.limit)
+    if arguments.workers <= 0:
+        raise SystemExit("--workers must be greater than zero")
 
     labels = load_labels(arguments.input_xlsx, arguments.sheet)
-    validator = DeepSeekValidator(
-        model=arguments.model,
-        base_url=arguments.base_url,
-        api_key=os.getenv("DEEPSEEK_API_KEY"),
-    )
+    base_urls = [arguments.base_url]
+    if arguments.secondary_base_url:
+        base_urls.append(arguments.secondary_base_url)
+    validators = [
+        DeepSeekValidator(
+            model=arguments.model,
+            base_url=base_urls[index % len(base_urls)],
+            api_key=os.getenv("DEEPSEEK_API_KEY"),
+        )
+        for index in range(arguments.workers)
+    ]
     summary = run_generation(
-        labels, arguments.output_jsonl, validator, arguments.model, arguments.limit
+        labels, arguments.output_jsonl, validators, arguments.model, arguments.limit
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 

@@ -16,6 +16,8 @@ from bio_geo_tagging.label_definition_validation import (
 
 
 class FakeValidator:
+    base_url = "test://primary"
+
     def generate(self, full_path):
         assert full_path == "知识点->地理工具->地球仪"
         return {
@@ -34,6 +36,19 @@ class FakeValidator:
             "differences": [],
             "needs_teacher_review": False,
             "reason": "语义一致",
+        }
+
+
+class AnyFakeValidator:
+    def __init__(self, base_url):
+        self.base_url = base_url
+
+    def generate(self, full_path):
+        return {
+            "definition": full_path,
+            "keywords": [],
+            "exam_methods": "",
+            "distinction": "",
         }
 
 
@@ -123,14 +138,16 @@ def test_generation_and_comparison_run_separately(tmp_path):
     generation_summary = run_generation(
         labels=labels,
         output_jsonl=str(generation_file),
-        validator=FakeValidator(),
+        validators=[FakeValidator()],
         model="test-model",
         limit=None,
     )
     generation_result = json.loads(generation_file.read_text(encoding="utf-8"))
 
     assert generation_summary["completed"] == 1
+    assert generation_summary["workers"] == 1
     assert "existing_interpretation" not in generation_result
+    assert generation_result["endpoint"] == "test://primary"
     assert generation_result["generated_interpretation"]["definition"] == "生成定义"
 
     generated_records = load_generated_records(str(generation_file))
@@ -150,6 +167,38 @@ def test_generation_and_comparison_run_separately(tmp_path):
     assert result["status"] == "completed"
     assert result["comparison_analysis"]["same_understanding"] is True
     assert result["comparison_analysis"]["needs_teacher_review"] is False
+
+
+def test_generation_distributes_workers_across_two_endpoints(tmp_path):
+    labels = [
+        {
+            "source_row": index + 2,
+            "label_id": str(index),
+            "full_path": f"知识点->{index}",
+            "existing_interpretation": {},
+        }
+        for index in range(4)
+    ]
+    validators = [
+        AnyFakeValidator("test://9093"),
+        AnyFakeValidator("test://9104"),
+        AnyFakeValidator("test://9093"),
+        AnyFakeValidator("test://9104"),
+    ]
+    output_file = tmp_path / "generation.jsonl"
+
+    summary = run_generation(
+        labels, str(output_file), validators, "test-model", limit=None
+    )
+    records = [
+        json.loads(line)
+        for line in output_file.read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert summary["completed"] == 4
+    assert summary["workers"] == 4
+    assert [record["endpoint"] for record in records].count("test://9093") == 2
+    assert [record["endpoint"] for record in records].count("test://9104") == 2
 
 
 def test_comparison_stops_when_generation_is_incomplete(tmp_path):
