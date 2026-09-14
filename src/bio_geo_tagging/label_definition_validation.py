@@ -166,12 +166,16 @@ class DeepSeekValidator:
             "model": self.model,
             "messages": messages,
             "max_tokens": max_tokens,
-            "stream": False,
+            "stream": True,
             "temperature": 0,
         }
 
         response = self.client.chat.completions.create(**request)
-        content = response.choices[0].message.content
+        content = "".join(
+            chunk.choices[0].delta.content or ""
+            for chunk in response
+            if chunk.choices
+        )
         if not content or not content.strip():
             raise ValueError("DeepSeek returned empty content")
 

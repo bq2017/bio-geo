@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 from openpyxl import Workbook
 
@@ -67,6 +68,24 @@ def test_local_service_does_not_require_api_key():
         base_url="http://172.22.0.35:9092/v1",
     )
     assert validator.model == "DeepSeek-V4-Flash"
+
+
+def test_request_json_reads_streamed_content():
+    validator = DeepSeekValidator(
+        model="DeepSeek-V4-Flash",
+        base_url="http://172.22.0.35:9092/v1",
+    )
+    chunks = [
+        SimpleNamespace(
+            choices=[SimpleNamespace(delta=SimpleNamespace(content='{"ok":'))]
+        ),
+        SimpleNamespace(
+            choices=[SimpleNamespace(delta=SimpleNamespace(content="true}"))]
+        ),
+    ]
+    validator.client.chat.completions.create = lambda **request: chunks
+
+    assert validator.request_json([], 64) == {"ok": True}
 
 
 def test_load_and_validate_one_label(tmp_path):
