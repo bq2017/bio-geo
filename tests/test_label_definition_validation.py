@@ -32,9 +32,8 @@ class FakeValidator:
         return {
             "same_understanding": True,
             "differences": [],
-            "uncertain": False,
+            "needs_teacher_review": False,
             "reason": "语义一致",
-            "teacher_review_required": False,
         }
 
 
@@ -89,7 +88,7 @@ def test_request_json_reads_streamed_content():
     assert validator.request_json([], 64) == {"ok": True}
 
 
-def test_compare_marks_uncertain_difference_for_teacher_review():
+def test_compare_marks_difference_for_teacher_review():
     validator = DeepSeekValidator(
         model="DeepSeek-V4-Flash",
         base_url="http://172.22.0.35:9092/v1",
@@ -97,15 +96,21 @@ def test_compare_marks_uncertain_difference_for_teacher_review():
     comparison = {
         "same_understanding": False,
         "differences": ["原释义和生成释义的知识范围不同"],
-        "uncertain": True,
+        "needs_teacher_review": True,
         "reason": "两种范围都有合理依据",
     }
     validator.request_json = lambda messages, max_tokens: comparison
 
     result = validator.compare("知识点->地理工具->地球仪", {}, {})
 
+    assert set(result) == {
+        "same_understanding",
+        "differences",
+        "needs_teacher_review",
+        "reason",
+    }
     assert result["same_understanding"] is False
-    assert result["teacher_review_required"] is True
+    assert result["needs_teacher_review"] is True
 
 
 def test_generation_and_comparison_run_separately(tmp_path):
@@ -144,7 +149,7 @@ def test_generation_and_comparison_run_separately(tmp_path):
     assert result["label_id"] == "2276111643787415552"
     assert result["status"] == "completed"
     assert result["comparison_analysis"]["same_understanding"] is True
-    assert result["comparison_analysis"]["teacher_review_required"] is False
+    assert result["comparison_analysis"]["needs_teacher_review"] is False
 
 
 def test_comparison_stops_when_generation_is_incomplete(tmp_path):
