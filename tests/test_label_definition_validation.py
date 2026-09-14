@@ -84,10 +84,13 @@ def test_generation_prompt_contains_path_but_not_existing_definition():
     assert "现有定义" not in prompt
 
 
-def test_comparison_prompt_defines_scope_conflict_and_teacher_review_rules():
+def test_comparison_prompt_prioritizes_overall_scope():
     assert "明确排除某项内容" in COMPARISON_SYSTEM_PROMPT
+    assert "核心教学目标与主要知识范围" in COMPARISON_SYSTEM_PROMPT
+    assert "不要抓住单个词句" in COMPARISON_SYSTEM_PROMPT
+    assert "是否指向同一具体内容" in COMPARISON_SYSTEM_PROMPT
     assert "必须将 same_understanding 设为 false" in COMPARISON_SYSTEM_PROMPT
-    assert "现有释义已经明确说明包含或排除范围" in COMPARISON_SYSTEM_PROMPT
+    assert "局部措辞不严谨但不影响整体边界" in COMPARISON_SYSTEM_PROMPT
 
 
 def test_local_service_does_not_require_api_key():
