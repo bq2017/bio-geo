@@ -9,10 +9,13 @@ description = "高中生物地理知识点打标项目"
 requires-python = ">=3.11"
 dependencies = [
     "beautifulsoup4>=4.12",
+    "openai>=1.0",
+    "openpyxl>=3.1",
     "tqdm>=4.66",
 ]
 
 [project.scripts]
+label-definition-validate = "bio_geo_tagging.label_definition_validation:main"
 question-info-merge = "bio_geo_tagging.question_info_merge:main"
 
 [project.optional-dependencies]

@@ -50,6 +50,20 @@ question-info-merge `
 
 该命令保持既有清洗和聚合规则，仅将输入、输出及日志路径改为运行时参数。
 
+## 知识点释义一致性验证
+
+设置 DeepSeek API 密钥后，先运行少量知识点：
+
+```powershell
+$env:DEEPSEEK_API_KEY = "your-api-key"
+label-definition-validate `
+  --input-xlsx data/taxonomy/geography-knowledge-graph.xlsx `
+  --output-jsonl runs/validation/label-definition-consistency.jsonl `
+  --limit 3
+```
+
+第一次模型调用只接收完整知识点路径并生成释义。第二次调用才接收生成释义和 Excel 中的现有释义，并输出一致性结论。结果逐条追加到 JSONL；重复执行时会跳过已经成功完成的知识点。
+
 ## 数据安全边界
 
 - 不向仓库提交真实题目、答案、解析和人工标注数据。
