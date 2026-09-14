@@ -12,8 +12,8 @@ from tqdm import tqdm
 
 
 DEFAULT_SHEET = "知识点及试题量详情"
-DEFAULT_MODEL = "deepseek-v4-pro"
-DEFAULT_BASE_URL = "https://api.deepseek.com"
+DEFAULT_MODEL = "DeepSeek-V4-Flash"
+DEFAULT_BASE_URL = "http://172.22.0.35:9092/v1"
 
 COLUMNS = {
     "full_path": "全路径知识点名称",
@@ -146,12 +146,13 @@ class DeepSeekValidator:
 
     def __init__(
         self,
-        api_key: str,
         model: str,
+        base_url: str,
+        api_key: str | None = None,
     ) -> None:
         self.client = OpenAI(
-            api_key=api_key,
-            base_url=DEFAULT_BASE_URL,
+            api_key=api_key or "not-required",
+            base_url=base_url,
             timeout=120.0,
             max_retries=2,
         )
@@ -164,11 +165,9 @@ class DeepSeekValidator:
         request: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "response_format": {"type": "json_object"},
             "max_tokens": max_tokens,
             "stream": False,
             "temperature": 0,
-            "extra_body": {"thinking": {"type": "disabled"}},
         }
 
         response = self.client.chat.completions.create(**request)
@@ -176,7 +175,14 @@ class DeepSeekValidator:
         if not content or not content.strip():
             raise ValueError("DeepSeek returned empty content")
 
-        result = json.loads(content)
+        cleaned_content = content.strip()
+        if cleaned_content.startswith("```"):
+            cleaned_content = cleaned_content.removeprefix("```json").removeprefix(
+                "```"
+            )
+            cleaned_content = cleaned_content.removesuffix("```").strip()
+
+        result = json.loads(cleaned_content)
         if not isinstance(result, dict):
             raise ValueError("DeepSeek response is not a JSON object")
         return result
@@ -316,6 +322,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="DeepSeek model",
     )
     parser.add_argument(
+        "--base-url",
+        default=os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL),
+        help="OpenAI-compatible API base URL",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         help="Maximum number of new labels to process in this run",
@@ -329,14 +340,11 @@ def main() -> None:
     if arguments.limit is not None and arguments.limit <= 0:
         raise SystemExit("--limit must be greater than zero")
 
-    api_key = os.getenv("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise SystemExit("DEEPSEEK_API_KEY is not set")
-
     labels = load_labels(arguments.input_xlsx, arguments.sheet)
     validator = DeepSeekValidator(
-        api_key=api_key,
         model=arguments.model,
+        base_url=arguments.base_url,
+        api_key=os.getenv("DEEPSEEK_API_KEY"),
     )
     summary = run_validation(
         labels=labels,

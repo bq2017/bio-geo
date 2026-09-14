@@ -4,6 +4,7 @@ from openpyxl import Workbook
 
 from bio_geo_tagging.label_definition_validation import (
     COLUMNS,
+    DeepSeekValidator,
     build_generation_messages,
     load_labels,
     run_validation,
@@ -58,6 +59,14 @@ def test_generation_prompt_contains_path_but_not_existing_definition():
     prompt = json.dumps(messages, ensure_ascii=False)
     assert "知识点->地理工具->地球仪" in prompt
     assert "现有定义" not in prompt
+
+
+def test_local_service_does_not_require_api_key():
+    validator = DeepSeekValidator(
+        model="DeepSeek-V4-Flash",
+        base_url="http://172.22.0.35:9092/v1",
+    )
+    assert validator.model == "DeepSeek-V4-Flash"
 
 
 def test_load_and_validate_one_label(tmp_path):

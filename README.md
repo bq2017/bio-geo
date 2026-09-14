@@ -52,13 +52,13 @@ question-info-merge `
 
 ## 知识点释义一致性验证
 
-设置 DeepSeek API 密钥后，先运行少量知识点：
+使用内网 OpenAI 兼容服务，先运行少量知识点：
 
 ```powershell
-$env:DEEPSEEK_API_KEY = "your-api-key"
 label-definition-validate `
   --input-xlsx data/taxonomy/geography-knowledge-graph.xlsx `
   --output-jsonl runs/validation/label-definition-consistency.jsonl `
+  --base-url http://172.22.0.35:9092/v1 `
   --limit 3
 ```
 
