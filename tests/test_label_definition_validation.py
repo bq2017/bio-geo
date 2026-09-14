@@ -88,6 +88,8 @@ def test_comparison_prompt_prioritizes_overall_scope():
     assert "明确排除某项内容" in COMPARISON_SYSTEM_PROMPT
     assert "核心教学目标与主要知识范围" in COMPARISON_SYSTEM_PROMPT
     assert "不要抓住单个词句" in COMPARISON_SYSTEM_PROMPT
+    assert "只是解释、示例、公式展开或应用场景" in COMPARISON_SYSTEM_PROMPT
+    assert "构成可独立考查的教学目标" in COMPARISON_SYSTEM_PROMPT
     assert "是否指向同一具体内容" in COMPARISON_SYSTEM_PROMPT
     assert "必须将 same_understanding 设为 false" in COMPARISON_SYSTEM_PROMPT
     assert "局部措辞不严谨但不影响整体边界" in COMPARISON_SYSTEM_PROMPT
