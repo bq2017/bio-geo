@@ -30,26 +30,11 @@ class FakeValidator:
         assert existing["definition"] == "现有定义"
         assert generated["definition"] == "生成定义"
         return {
-            "definition_analysis": {
-                "difference_types": ["consistent"],
-                "detail": "定义一致",
-            },
-            "keywords_analysis": {
-                "difference_types": ["consistent"],
-                "detail": "关键词一致",
-            },
-            "exam_methods_analysis": {
-                "difference_types": ["consistent"],
-                "detail": "考查方式一致",
-            },
-            "distinction_analysis": {
-                "difference_types": ["consistent"],
-                "detail": "边界一致",
-            },
-            "overall_difference_types": ["consistent"],
-            "summary": "语义一致",
-            "recommendation": "keep_existing",
-            "review_required": False,
+            "same_understanding": True,
+            "differences": [],
+            "uncertain": False,
+            "reason": "语义一致",
+            "teacher_review_required": False,
         }
 
 
@@ -104,39 +89,23 @@ def test_request_json_reads_streamed_content():
     assert validator.request_json([], 64) == {"ok": True}
 
 
-def test_compare_accepts_scope_difference_without_teacher_review():
+def test_compare_marks_uncertain_difference_for_teacher_review():
     validator = DeepSeekValidator(
         model="DeepSeek-V4-Flash",
         base_url="http://172.22.0.35:9092/v1",
     )
     comparison = {
-        "definition_analysis": {
-            "difference_types": ["scope_difference"],
-            "detail": "生成释义范围更宽",
-        },
-        "keywords_analysis": {
-            "difference_types": ["scope_difference"],
-            "detail": "生成释义包含上位概念",
-        },
-        "exam_methods_analysis": {
-            "difference_types": ["consistent"],
-            "detail": "核心考查方式一致",
-        },
-        "distinction_analysis": {
-            "difference_types": ["boundary_difference"],
-            "detail": "生成释义未遵守末级知识点边界",
-        },
-        "overall_difference_types": ["scope_difference", "boundary_difference"],
-        "summary": "生成理解超出末级知识点范围",
-        "recommendation": "improve_generation",
-        "review_required": False,
+        "same_understanding": False,
+        "differences": ["原释义和生成释义的知识范围不同"],
+        "uncertain": True,
+        "reason": "两种范围都有合理依据",
     }
     validator.request_json = lambda messages, max_tokens: comparison
 
     result = validator.compare("知识点->地理工具->地球仪", {}, {})
 
-    assert result["recommendation"] == "improve_generation"
-    assert result["review_required"] is False
+    assert result["same_understanding"] is False
+    assert result["teacher_review_required"] is True
 
 
 def test_generation_and_comparison_run_separately(tmp_path):
@@ -174,10 +143,8 @@ def test_generation_and_comparison_run_separately(tmp_path):
     assert comparison_summary["missing_generation"] == 0
     assert result["label_id"] == "2276111643787415552"
     assert result["status"] == "completed"
-    assert result["comparison_analysis"]["overall_difference_types"] == [
-        "consistent"
-    ]
-    assert result["comparison_analysis"]["recommendation"] == "keep_existing"
+    assert result["comparison_analysis"]["same_understanding"] is True
+    assert result["comparison_analysis"]["teacher_review_required"] is False
 
 
 def test_comparison_stops_when_generation_is_incomplete(tmp_path):
