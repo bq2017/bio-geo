@@ -27,12 +27,25 @@ class FakeValidator:
         assert existing["definition"] == "现有定义"
         assert generated["definition"] == "生成定义"
         return {
-            "definition_status": "consistent",
-            "keywords_status": "consistent",
-            "exam_methods_status": "consistent",
-            "distinction_status": "consistent",
-            "overall_status": "consistent",
-            "reason": "语义一致",
+            "definition_analysis": {
+                "difference_types": ["consistent"],
+                "detail": "定义一致",
+            },
+            "keywords_analysis": {
+                "difference_types": ["consistent"],
+                "detail": "关键词一致",
+            },
+            "exam_methods_analysis": {
+                "difference_types": ["consistent"],
+                "detail": "考查方式一致",
+            },
+            "distinction_analysis": {
+                "difference_types": ["consistent"],
+                "detail": "边界一致",
+            },
+            "overall_difference_types": ["consistent"],
+            "summary": "语义一致",
+            "recommendation": "keep_existing",
             "review_required": False,
         }
 
@@ -88,6 +101,41 @@ def test_request_json_reads_streamed_content():
     assert validator.request_json([], 64) == {"ok": True}
 
 
+def test_compare_accepts_scope_difference_without_teacher_review():
+    validator = DeepSeekValidator(
+        model="DeepSeek-V4-Flash",
+        base_url="http://172.22.0.35:9092/v1",
+    )
+    comparison = {
+        "definition_analysis": {
+            "difference_types": ["scope_difference"],
+            "detail": "生成释义范围更宽",
+        },
+        "keywords_analysis": {
+            "difference_types": ["scope_difference"],
+            "detail": "生成释义包含上位概念",
+        },
+        "exam_methods_analysis": {
+            "difference_types": ["consistent"],
+            "detail": "核心考查方式一致",
+        },
+        "distinction_analysis": {
+            "difference_types": ["boundary_difference"],
+            "detail": "生成释义未遵守末级知识点边界",
+        },
+        "overall_difference_types": ["scope_difference", "boundary_difference"],
+        "summary": "生成理解超出末级知识点范围",
+        "recommendation": "improve_generation",
+        "review_required": False,
+    }
+    validator.request_json = lambda messages, max_tokens: comparison
+
+    result = validator.compare("知识点->地理工具->地球仪", {}, {})
+
+    assert result["recommendation"] == "improve_generation"
+    assert result["review_required"] is False
+
+
 def test_load_and_validate_one_label(tmp_path):
     input_file = tmp_path / "knowledge-graph.xlsx"
     output_file = tmp_path / "validation.jsonl"
@@ -106,4 +154,7 @@ def test_load_and_validate_one_label(tmp_path):
     assert summary["completed"] == 1
     assert result["label_id"] == "2276111643787415552"
     assert result["status"] == "completed"
-    assert result["consistency"]["overall_status"] == "consistent"
+    assert result["comparison_analysis"]["overall_difference_types"] == [
+        "consistent"
+    ]
+    assert result["comparison_analysis"]["recommendation"] == "keep_existing"
