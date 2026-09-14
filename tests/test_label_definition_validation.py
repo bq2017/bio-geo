@@ -6,6 +6,7 @@ from openpyxl import Workbook
 
 from bio_geo_tagging.label_definition_validation import (
     COLUMNS,
+    COMPARISON_SYSTEM_PROMPT,
     DeepSeekValidator,
     build_generation_messages,
     load_generated_records,
@@ -81,6 +82,12 @@ def test_generation_prompt_contains_path_but_not_existing_definition():
     prompt = json.dumps(messages, ensure_ascii=False)
     assert "知识点->地理工具->地球仪" in prompt
     assert "现有定义" not in prompt
+
+
+def test_comparison_prompt_defines_scope_conflict_and_teacher_review_rules():
+    assert "明确排除某项内容" in COMPARISON_SYSTEM_PROMPT
+    assert "必须将 same_understanding 设为 false" in COMPARISON_SYSTEM_PROMPT
+    assert "现有释义已经明确说明包含或排除范围" in COMPARISON_SYSTEM_PROMPT
 
 
 def test_local_service_does_not_require_api_key():
