@@ -33,9 +33,8 @@ class FakeValidator:
         assert generated["definition"] == "生成定义"
         return {
             "same_understanding": True,
-            "differences": [],
+            "difference_summary": "",
             "needs_teacher_review": False,
-            "reason": "语义一致",
         }
 
 
@@ -110,9 +109,8 @@ def test_compare_marks_difference_for_teacher_review():
     )
     comparison = {
         "same_understanding": False,
-        "differences": ["原释义和生成释义的知识范围不同"],
+        "difference_summary": "原释义和生成释义的知识范围不同",
         "needs_teacher_review": True,
-        "reason": "两种范围都有合理依据",
     }
     validator.request_json = lambda messages, max_tokens: comparison
 
@@ -120,9 +118,8 @@ def test_compare_marks_difference_for_teacher_review():
 
     assert set(result) == {
         "same_understanding",
-        "differences",
+        "difference_summary",
         "needs_teacher_review",
-        "reason",
     }
     assert result["same_understanding"] is False
     assert result["needs_teacher_review"] is True

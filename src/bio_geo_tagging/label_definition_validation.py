@@ -49,12 +49,11 @@ COMPARISON_SYSTEM_PROMPT = """你是高中地理知识体系审核专家。
 必须输出合法 json，格式如下：
 {
   "same_understanding": true,
-  "differences": [],
-  "needs_teacher_review": false,
-  "reason": "判断依据"
+  "difference_summary": "",
+  "needs_teacher_review": false
 }
-same_understanding 为 false 时，differences 必须逐条写明具体差异；
-same_understanding 为 true 时，differences 必须为空数组，needs_teacher_review 必须为 false。"""
+same_understanding 为 false 时，difference_summary 必须用一句话概括核心差异，不要解释是否需要教师复核；
+same_understanding 为 true 时，difference_summary 必须为空字符串，needs_teacher_review 必须为 false。"""
 
 
 def as_text(value: Any) -> str:
@@ -205,13 +204,12 @@ class DeepSeekValidator:
     ) -> dict[str, Any]:
         """Compare an independently generated interpretation with the existing one."""
         result = self.request_json(
-            build_comparison_messages(full_path, existing, generated), 700
+            build_comparison_messages(full_path, existing, generated), 256
         )
         required = {
             "same_understanding",
-            "differences",
+            "difference_summary",
             "needs_teacher_review",
-            "reason",
         }
         missing = required.difference(result)
         if missing:
@@ -220,27 +218,26 @@ class DeepSeekValidator:
             raise ValueError("same_understanding must be a boolean")
         if not isinstance(result["needs_teacher_review"], bool):
             raise ValueError("needs_teacher_review must be a boolean")
-        differences = result["differences"]
-        if not isinstance(differences, list) or not all(
-            isinstance(item, str) and item.strip() for item in differences
-        ):
-            raise ValueError("differences must be a list of non-empty strings")
-        if result["same_understanding"] and differences:
-            raise ValueError("differences must be empty when understanding is the same")
-        if not result["same_understanding"] and not differences:
-            raise ValueError("differences are required when understanding differs")
+        difference_summary = result["difference_summary"]
+        if not isinstance(difference_summary, str):
+            raise ValueError("difference_summary must be a string")
+        if result["same_understanding"] and difference_summary:
+            raise ValueError(
+                "difference_summary must be empty when understanding is the same"
+            )
+        if not result["same_understanding"] and not difference_summary.strip():
+            raise ValueError(
+                "difference_summary is required when understanding differs"
+            )
         if result["same_understanding"] and result["needs_teacher_review"]:
             raise ValueError(
                 "needs_teacher_review must be false when understanding is the same"
             )
-        if not isinstance(result["reason"], str) or not result["reason"].strip():
-            raise ValueError("reason must be a non-empty string")
 
         return {
             "same_understanding": result["same_understanding"],
-            "differences": differences,
+            "difference_summary": difference_summary,
             "needs_teacher_review": result["needs_teacher_review"],
-            "reason": result["reason"],
         }
 
 
