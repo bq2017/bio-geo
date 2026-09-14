@@ -375,11 +375,14 @@ def run_comparison(
     labels: list[dict[str, Any]],
     generated_records: dict[str, dict[str, Any]],
     output_jsonl: str,
-    validator: DeepSeekValidator,
+    validators: list[DeepSeekValidator],
     model: str,
     limit: int | None,
 ) -> dict[str, int]:
-    """Compare existing and generated interpretations serially."""
+    """Compare interpretations concurrently and persist each result immediately."""
+    if not validators:
+        raise ValueError("At least one validator is required")
+
     output_path = Path(output_jsonl)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     completed_ids = load_completed_ids(output_path)
@@ -404,42 +407,69 @@ def run_comparison(
         "attempted": 0,
         "completed": 0,
         "errors": 0,
+        "workers": min(len(validators), len(pending)),
     }
 
-    with output_path.open("a", encoding="utf-8") as output_stream:
-        for label in tqdm(pending, desc="Comparing interpretations"):
-            summary["attempted"] += 1
-            generated_record = generated_records[label["label_id"]]
-            try:
-                if generated_record.get("full_path") != label["full_path"]:
-                    raise ValueError("Full path differs between workbook and generation result")
-                generated = generated_record["generated_interpretation"]
-                comparison = validator.compare(
-                    label["full_path"], label["existing_interpretation"], generated
-                )
-                record = {
-                    **label,
-                    "generated_interpretation": generated,
-                    "comparison_analysis": comparison,
-                    "generation_model": generated_record.get("model"),
-                    "comparison_model": model,
-                    "status": "completed",
-                }
-                summary["completed"] += 1
-            except Exception as error:
-                record = {
-                    "source_row": label["source_row"],
-                    "label_id": label["label_id"],
-                    "full_path": label["full_path"],
-                    "comparison_model": model,
-                    "status": "error",
-                    "error_type": type(error).__name__,
-                    "error": str(error),
-                }
-                summary["errors"] += 1
+    write_lock = Lock()
 
-            output_stream.write(json.dumps(record, ensure_ascii=False) + "\n")
-            output_stream.flush()
+    with (
+        output_path.open("a", encoding="utf-8") as output_stream,
+        tqdm(total=len(pending), desc="Comparing interpretations") as progress,
+    ):
+
+        def process_batch(
+            validator: DeepSeekValidator, batch: list[dict[str, Any]]
+        ) -> None:
+            for label in batch:
+                endpoint = getattr(validator, "base_url", "")
+                generated_record = generated_records[label["label_id"]]
+                try:
+                    if generated_record.get("full_path") != label["full_path"]:
+                        raise ValueError(
+                            "Full path differs between workbook and generation result"
+                        )
+                    generated = generated_record["generated_interpretation"]
+                    comparison = validator.compare(
+                        label["full_path"], label["existing_interpretation"], generated
+                    )
+                    record = {
+                        **label,
+                        "generated_interpretation": generated,
+                        "comparison_analysis": comparison,
+                        "generation_model": generated_record.get("model"),
+                        "comparison_model": model,
+                        "endpoint": endpoint,
+                        "status": "completed",
+                    }
+                    succeeded = True
+                except Exception as error:
+                    record = {
+                        "source_row": label["source_row"],
+                        "label_id": label["label_id"],
+                        "full_path": label["full_path"],
+                        "comparison_model": model,
+                        "endpoint": endpoint,
+                        "status": "error",
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                    }
+                    succeeded = False
+
+                with write_lock:
+                    summary["attempted"] += 1
+                    summary["completed" if succeeded else "errors"] += 1
+                    output_stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    output_stream.flush()
+                    progress.update(1)
+
+        with ThreadPoolExecutor(max_workers=len(validators)) as executor:
+            futures = [
+                executor.submit(process_batch, validator, pending[index::len(validators)])
+                for index, validator in enumerate(validators)
+                if pending[index::len(validators)]
+            ]
+            for future in futures:
+                future.result()
 
     return summary
 
@@ -516,21 +546,45 @@ def compare_main() -> None:
         "--generated-jsonl", required=True, help="Completed generation results"
     )
     parser.add_argument("--output-jsonl", required=True, help="Comparison results")
+    parser.add_argument(
+        "--secondary-base-url",
+        help="Optional second OpenAI-compatible API base URL",
+    )
+    parser.add_argument(
+        "--tertiary-base-url",
+        help="Optional third OpenAI-compatible API base URL",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Total comparison workers distributed across the API endpoints",
+    )
     arguments = parser.parse_args()
     validate_limit(arguments.limit)
+    if arguments.workers <= 0:
+        raise SystemExit("--workers must be greater than zero")
 
     labels = load_labels(arguments.input_xlsx, arguments.sheet)
     generated_records = load_generated_records(arguments.generated_jsonl)
-    validator = DeepSeekValidator(
-        model=arguments.model,
-        base_url=arguments.base_url,
-        api_key=os.getenv("DEEPSEEK_API_KEY"),
-    )
+    base_urls = [arguments.base_url]
+    if arguments.secondary_base_url:
+        base_urls.append(arguments.secondary_base_url)
+    if arguments.tertiary_base_url:
+        base_urls.append(arguments.tertiary_base_url)
+    validators = [
+        DeepSeekValidator(
+            model=arguments.model,
+            base_url=base_urls[index % len(base_urls)],
+            api_key=os.getenv("DEEPSEEK_API_KEY"),
+        )
+        for index in range(arguments.workers)
+    ]
     summary = run_comparison(
         labels,
         generated_records,
         arguments.output_jsonl,
-        validator,
+        validators,
         arguments.model,
         arguments.limit,
     )

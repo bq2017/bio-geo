@@ -50,6 +50,13 @@ class AnyFakeValidator:
             "distinction": "",
         }
 
+    def compare(self, full_path, existing, generated):
+        return {
+            "same_understanding": True,
+            "difference_summary": "",
+            "needs_teacher_review": False,
+        }
+
 
 def create_workbook(path):
     workbook = Workbook()
@@ -152,7 +159,7 @@ def test_generation_and_comparison_run_separately(tmp_path):
         labels=labels,
         generated_records=generated_records,
         output_jsonl=str(comparison_file),
-        validator=FakeValidator(),
+        validators=[FakeValidator()],
         model="test-model",
         limit=None,
     )
@@ -198,6 +205,51 @@ def test_generation_distributes_workers_across_two_endpoints(tmp_path):
     assert [record["endpoint"] for record in records].count("test://9104") == 2
 
 
+def test_comparison_distributes_workers_across_three_endpoints(tmp_path):
+    labels = [
+        {
+            "source_row": index + 2,
+            "label_id": str(index),
+            "full_path": f"知识点->{index}",
+            "existing_interpretation": {},
+        }
+        for index in range(6)
+    ]
+    generated_records = {
+        label["label_id"]: {
+            "full_path": label["full_path"],
+            "generated_interpretation": {},
+            "model": "test-model",
+        }
+        for label in labels
+    }
+    validators = [
+        AnyFakeValidator("test://9102"),
+        AnyFakeValidator("test://9103"),
+        AnyFakeValidator("test://9104"),
+    ]
+    output_file = tmp_path / "comparison.jsonl"
+
+    summary = run_comparison(
+        labels,
+        generated_records,
+        str(output_file),
+        validators,
+        "test-model",
+        limit=None,
+    )
+    records = [
+        json.loads(line)
+        for line in output_file.read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert summary["completed"] == 6
+    assert summary["workers"] == 3
+    assert [record["endpoint"] for record in records].count("test://9102") == 2
+    assert [record["endpoint"] for record in records].count("test://9103") == 2
+    assert [record["endpoint"] for record in records].count("test://9104") == 2
+
+
 def test_comparison_stops_when_generation_is_incomplete(tmp_path):
     input_file = tmp_path / "knowledge-graph.xlsx"
     create_workbook(input_file)
@@ -208,7 +260,7 @@ def test_comparison_stops_when_generation_is_incomplete(tmp_path):
             labels=labels,
             generated_records={},
             output_jsonl=str(tmp_path / "comparison.jsonl"),
-            validator=FakeValidator(),
+            validators=[FakeValidator()],
             model="test-model",
             limit=None,
         )
