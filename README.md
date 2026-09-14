@@ -50,19 +50,28 @@ question-info-merge `
 
 该命令保持既有清洗和聚合规则，仅将输入、输出及日志路径改为运行时参数。
 
-## 知识点释义一致性验证
+## 知识点释义分析
 
-使用内网 OpenAI 兼容服务，先运行少量知识点：
+第一步仅根据完整知识点路径生成模型释义：
 
-```powershell
-label-definition-validate `
-  --input-xlsx data/taxonomy/geography-knowledge-graph.xlsx `
-  --output-jsonl runs/validation/label-definition-consistency.jsonl `
-  --base-url http://172.22.0.35:9092/v1 `
-  --limit 3
+```bash
+label-definition-generate \
+  --input-xlsx data/taxonomy/geography-knowledge-graph.xlsx \
+  --output-jsonl runs/validation/label-definition-generation.jsonl \
+  --base-url http://172.22.0.35:9092/v1
 ```
 
-第一次模型调用只接收完整知识点路径并生成释义。第二次调用才接收生成释义和 Excel 中的现有释义，区分范围差异、边界差异、信息缺失和事实冲突，并给出保留原释义、改进生成理解、教师复核或更新原释义的建议。结果逐条追加到 JSONL；重复执行时会跳过已经成功完成的知识点。
+确认第一步全部完成后，第二步读取生成结果并与 Excel 中的现有释义比较：
+
+```bash
+label-definition-compare \
+  --input-xlsx data/taxonomy/geography-knowledge-graph.xlsx \
+  --generated-jsonl runs/validation/label-definition-generation.jsonl \
+  --output-jsonl runs/validation/label-definition-comparison.jsonl \
+  --base-url http://172.22.0.35:9092/v1
+```
+
+两个阶段的结果分别逐条追加到 JSONL，重复执行时会跳过该阶段已经成功完成的知识点。如果第一步存在缺失结果，第二步会直接停止并报告缺失数量。
 
 ## 数据安全边界
 

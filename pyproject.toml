@@ -15,7 +15,8 @@ dependencies = [
 ]
 
 [project.scripts]
-label-definition-validate = "bio_geo_tagging.label_definition_validation:main"
+label-definition-generate = "bio_geo_tagging.label_definition_validation:generate_main"
+label-definition-compare = "bio_geo_tagging.label_definition_validation:compare_main"
 question-info-merge = "bio_geo_tagging.question_info_merge:main"
 
 [project.optional-dependencies]

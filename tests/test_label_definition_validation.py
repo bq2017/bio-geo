@@ -1,14 +1,17 @@
 import json
 from types import SimpleNamespace
 
+import pytest
 from openpyxl import Workbook
 
 from bio_geo_tagging.label_definition_validation import (
     COLUMNS,
     DeepSeekValidator,
     build_generation_messages,
+    load_generated_records,
     load_labels,
-    run_validation,
+    run_comparison,
+    run_generation,
 )
 
 
@@ -136,25 +139,58 @@ def test_compare_accepts_scope_difference_without_teacher_review():
     assert result["review_required"] is False
 
 
-def test_load_and_validate_one_label(tmp_path):
+def test_generation_and_comparison_run_separately(tmp_path):
     input_file = tmp_path / "knowledge-graph.xlsx"
-    output_file = tmp_path / "validation.jsonl"
+    generation_file = tmp_path / "generation.jsonl"
+    comparison_file = tmp_path / "comparison.jsonl"
     create_workbook(input_file)
 
     labels = load_labels(str(input_file), "知识点及试题量详情")
-    summary = run_validation(
+    generation_summary = run_generation(
         labels=labels,
-        output_jsonl=str(output_file),
+        output_jsonl=str(generation_file),
+        validator=FakeValidator(),
+        model="test-model",
+        limit=None,
+    )
+    generation_result = json.loads(generation_file.read_text(encoding="utf-8"))
+
+    assert generation_summary["completed"] == 1
+    assert "existing_interpretation" not in generation_result
+    assert generation_result["generated_interpretation"]["definition"] == "生成定义"
+
+    generated_records = load_generated_records(str(generation_file))
+    comparison_summary = run_comparison(
+        labels=labels,
+        generated_records=generated_records,
+        output_jsonl=str(comparison_file),
         validator=FakeValidator(),
         model="test-model",
         limit=None,
     )
 
-    result = json.loads(output_file.read_text(encoding="utf-8"))
-    assert summary["completed"] == 1
+    result = json.loads(comparison_file.read_text(encoding="utf-8"))
+    assert comparison_summary["completed"] == 1
+    assert comparison_summary["missing_generation"] == 0
     assert result["label_id"] == "2276111643787415552"
     assert result["status"] == "completed"
     assert result["comparison_analysis"]["overall_difference_types"] == [
         "consistent"
     ]
     assert result["comparison_analysis"]["recommendation"] == "keep_existing"
+
+
+def test_comparison_stops_when_generation_is_incomplete(tmp_path):
+    input_file = tmp_path / "knowledge-graph.xlsx"
+    create_workbook(input_file)
+    labels = load_labels(str(input_file), "知识点及试题量详情")
+
+    with pytest.raises(ValueError, match="Generation stage is incomplete: 1"):
+        run_comparison(
+            labels=labels,
+            generated_records={},
+            output_jsonl=str(tmp_path / "comparison.jsonl"),
+            validator=FakeValidator(),
+            model="test-model",
+            limit=None,
+        )

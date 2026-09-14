@@ -296,14 +296,14 @@ def load_completed_ids(output_jsonl: Path) -> set[str]:
     return completed
 
 
-def run_validation(
+def run_generation(
     labels: list[dict[str, Any]],
     output_jsonl: str,
     validator: DeepSeekValidator,
     model: str,
     limit: int | None,
 ) -> dict[str, int]:
-    """Validate labels serially and persist each result immediately."""
+    """Generate interpretations serially and persist each result immediately."""
     output_path = Path(output_jsonl)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     completed_ids = load_completed_ids(output_path)
@@ -320,19 +320,15 @@ def run_validation(
     }
 
     with output_path.open("a", encoding="utf-8") as output_stream:
-        for label in tqdm(pending, desc="Validating labels"):
+        for label in tqdm(pending, desc="Generating interpretations"):
             summary["attempted"] += 1
             try:
                 generated = validator.generate(label["full_path"])
-                comparison = validator.compare(
-                    label["full_path"],
-                    label["existing_interpretation"],
-                    generated,
-                )
                 record = {
-                    **label,
+                    "source_row": label["source_row"],
+                    "label_id": label["label_id"],
+                    "full_path": label["full_path"],
                     "generated_interpretation": generated,
-                    "comparison_analysis": comparison,
                     "model": model,
                     "status": "completed",
                 }
@@ -355,13 +351,109 @@ def run_validation(
     return summary
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Build the command-line parser."""
-    parser = argparse.ArgumentParser(
-        description="Validate label definitions with two independent DeepSeek calls."
-    )
+def load_generated_records(input_jsonl: str) -> dict[str, dict[str, Any]]:
+    """Load successfully generated interpretations by label ID."""
+    input_path = Path(input_jsonl)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Generation results not found: {input_jsonl}")
+
+    records = {}
+    with input_path.open("r", encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"Invalid JSON in generation results at line {line_number}: {error}"
+                ) from error
+            if record.get("status") != "completed":
+                continue
+            label_id = as_text(record.get("label_id"))
+            if not label_id or not isinstance(record.get("generated_interpretation"), dict):
+                raise ValueError(f"Invalid completed generation record at line {line_number}")
+            records[label_id] = record
+    return records
+
+
+def run_comparison(
+    labels: list[dict[str, Any]],
+    generated_records: dict[str, dict[str, Any]],
+    output_jsonl: str,
+    validator: DeepSeekValidator,
+    model: str,
+    limit: int | None,
+) -> dict[str, int]:
+    """Compare existing and generated interpretations serially."""
+    output_path = Path(output_jsonl)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    completed_ids = load_completed_ids(output_path)
+    selected = labels[:limit] if limit is not None else labels
+    missing = [
+        label for label in selected if label["label_id"] not in generated_records
+    ]
+    if missing:
+        raise ValueError(
+            f"Generation stage is incomplete: {len(missing)} selected labels are missing"
+        )
+    pending = [
+        label for label in selected if label["label_id"] not in completed_ids
+    ]
+
+    summary = {
+        "total_labels": len(labels),
+        "selected_labels": len(selected),
+        "generation_available": len(selected),
+        "missing_generation": 0,
+        "already_completed": len(completed_ids),
+        "attempted": 0,
+        "completed": 0,
+        "errors": 0,
+    }
+
+    with output_path.open("a", encoding="utf-8") as output_stream:
+        for label in tqdm(pending, desc="Comparing interpretations"):
+            summary["attempted"] += 1
+            generated_record = generated_records[label["label_id"]]
+            try:
+                if generated_record.get("full_path") != label["full_path"]:
+                    raise ValueError("Full path differs between workbook and generation result")
+                generated = generated_record["generated_interpretation"]
+                comparison = validator.compare(
+                    label["full_path"], label["existing_interpretation"], generated
+                )
+                record = {
+                    **label,
+                    "generated_interpretation": generated,
+                    "comparison_analysis": comparison,
+                    "generation_model": generated_record.get("model"),
+                    "comparison_model": model,
+                    "status": "completed",
+                }
+                summary["completed"] += 1
+            except Exception as error:
+                record = {
+                    "source_row": label["source_row"],
+                    "label_id": label["label_id"],
+                    "full_path": label["full_path"],
+                    "comparison_model": model,
+                    "status": "error",
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                }
+                summary["errors"] += 1
+
+            output_stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+            output_stream.flush()
+
+    return summary
+
+
+def build_common_parser(description: str) -> argparse.ArgumentParser:
+    """Build arguments shared by both processing stages."""
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--input-xlsx", required=True, help="Knowledge graph workbook")
-    parser.add_argument("--output-jsonl", required=True, help="Validation results")
     parser.add_argument("--sheet", default=DEFAULT_SHEET, help="Worksheet name")
     parser.add_argument(
         "--model",
@@ -381,11 +473,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
-    """Run label-definition consistency validation."""
-    arguments = build_parser().parse_args()
-    if arguments.limit is not None and arguments.limit <= 0:
+def validate_limit(limit: int | None) -> None:
+    """Validate the optional per-run record limit."""
+    if limit is not None and limit <= 0:
         raise SystemExit("--limit must be greater than zero")
+
+
+def generate_main() -> None:
+    """Run the independent interpretation generation stage."""
+    parser = build_common_parser("Generate interpretations from label paths.")
+    parser.add_argument("--output-jsonl", required=True, help="Generation results")
+    arguments = parser.parse_args()
+    validate_limit(arguments.limit)
 
     labels = load_labels(arguments.input_xlsx, arguments.sheet)
     validator = DeepSeekValidator(
@@ -393,15 +492,34 @@ def main() -> None:
         base_url=arguments.base_url,
         api_key=os.getenv("DEEPSEEK_API_KEY"),
     )
-    summary = run_validation(
-        labels=labels,
-        output_jsonl=arguments.output_jsonl,
-        validator=validator,
-        model=arguments.model,
-        limit=arguments.limit,
+    summary = run_generation(
+        labels, arguments.output_jsonl, validator, arguments.model, arguments.limit
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
+def compare_main() -> None:
+    """Run the comparison stage using completed generation results."""
+    parser = build_common_parser("Compare existing and generated interpretations.")
+    parser.add_argument(
+        "--generated-jsonl", required=True, help="Completed generation results"
+    )
+    parser.add_argument("--output-jsonl", required=True, help="Comparison results")
+    arguments = parser.parse_args()
+    validate_limit(arguments.limit)
 
-if __name__ == "__main__":
-    main()
+    labels = load_labels(arguments.input_xlsx, arguments.sheet)
+    generated_records = load_generated_records(arguments.generated_jsonl)
+    validator = DeepSeekValidator(
+        model=arguments.model,
+        base_url=arguments.base_url,
+        api_key=os.getenv("DEEPSEEK_API_KEY"),
+    )
+    summary = run_comparison(
+        labels,
+        generated_records,
+        arguments.output_jsonl,
+        validator,
+        arguments.model,
+        arguments.limit,
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
