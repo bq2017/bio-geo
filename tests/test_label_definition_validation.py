@@ -7,11 +7,15 @@ from openpyxl import Workbook
 from bio_geo_tagging.label_definition_validation import (
     COLUMNS,
     COMPARISON_SYSTEM_PROMPT,
+    DEFINITION_REVIEW_SYSTEM_PROMPT,
     DeepSeekValidator,
+    build_definition_review_messages,
     build_generation_messages,
+    load_comparison_records,
     load_generated_records,
     load_labels,
     run_comparison,
+    run_definition_review,
     run_generation,
 )
 
@@ -59,6 +63,22 @@ class AnyFakeValidator:
         }
 
 
+class ReviewFakeValidator:
+    base_url = "test://review"
+
+    def __init__(self):
+        self.reviewed = []
+
+    def review_definition(self, record):
+        self.reviewed.append(record["label_id"])
+        return {
+            "needs_definition_review": False,
+            "review_fields": [],
+            "review_reason": "",
+            "needs_teacher_review": False,
+        }
+
+
 def create_workbook(path):
     workbook = Workbook()
     worksheet = workbook.active
@@ -93,6 +113,12 @@ def test_comparison_prompt_prioritizes_overall_scope():
     assert "是否指向同一具体内容" in COMPARISON_SYSTEM_PROMPT
     assert "必须将 same_understanding 设为 false" in COMPARISON_SYSTEM_PROMPT
     assert "局部措辞不严谨但不影响整体边界" in COMPARISON_SYSTEM_PROMPT
+
+
+def test_definition_review_prompt_focuses_on_existing_interpretation():
+    assert "现有释义是否需要复核" in DEFINITION_REVIEW_SYSTEM_PROMPT
+    assert "不要按文字相似度判断" in DEFINITION_REVIEW_SYSTEM_PROMPT
+    assert "只输出 json，不要补充解释或修改后的释义" in DEFINITION_REVIEW_SYSTEM_PROMPT
 
 
 def test_local_service_does_not_require_api_key():
@@ -276,3 +302,42 @@ def test_comparison_stops_when_generation_is_incomplete(tmp_path):
             model="test-model",
             limit=None,
         )
+
+
+def test_definition_review_runs_sequentially_and_resumes(tmp_path):
+    input_file = tmp_path / "different.jsonl"
+    output_file = tmp_path / "review.jsonl"
+    records = [
+        {
+            "source_row": index + 2,
+            "label_id": str(index),
+            "full_path": f"知识点->{index}",
+            "existing_interpretation": {},
+            "generated_interpretation": {},
+            "comparison_analysis": {"same_understanding": False},
+            "status": "completed",
+        }
+        for index in range(2)
+    ]
+    input_file.write_text(
+        "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_comparison_records(str(input_file))
+    messages = build_definition_review_messages(loaded[0])
+    assert "知识点->0" in messages[1]["content"]
+
+    validator = ReviewFakeValidator()
+    summary = run_definition_review(
+        loaded, str(output_file), validator, "test-model", limit=None
+    )
+    assert validator.reviewed == ["0", "1"]
+    assert summary["completed"] == 2
+
+    second_validator = ReviewFakeValidator()
+    resumed = run_definition_review(
+        loaded, str(output_file), second_validator, "test-model", limit=None
+    )
+    assert second_validator.reviewed == []
+    assert resumed["already_completed"] == 2

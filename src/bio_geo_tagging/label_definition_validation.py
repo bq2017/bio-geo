@@ -61,6 +61,35 @@ COMPARISON_SYSTEM_PROMPT = """你是高中地理知识体系审核专家。
 same_understanding 为 false 时，difference_summary 必须用一句话概括核心差异，不要解释是否需要教师复核；
 same_understanding 为 true 时，difference_summary 必须为空字符串，needs_teacher_review 必须为 false。"""
 
+DEFINITION_REVIEW_SYSTEM_PROMPT = """你是高中地理知识体系审核专家。
+你的任务是判断现有释义是否需要复核，以便后续作为 DeepSeek 题目打标的知识依据。
+每次只审核一个知识点。完整路径、现有释义、独立生成释义和上一阶段对比结论都只是审核材料；不得默认任何一项必然正确。
+审核重点是现有释义是否准确、清晰、可识别，以及它的知识范围和相邻知识点边界是否足以支持模型打标。
+不要按文字相似度判断，也不要因为独立生成释义措辞不同、详略不同、增加同类示例或自身范围过宽就要求复核。
+以下情况需要复核现有释义：现有释义与完整路径的范围不一致；现有释义内部矛盾或有关键事实错误；缺少会导致模型混淆相邻标签的重要边界；遗漏该标签不可缺少的核心内容；标签存在两种合理解释且现有材料无法确定边界。
+如果现有释义清晰合理，而差异来自独立生成释义理解错误，则不需要复核。
+只有当前材料无法确定正确知识边界、必须由教师裁定时，needs_teacher_review 才为 true。
+review_fields 只能从 full_path、definition、keywords、exam_methods、distinction 中选择。
+必须输出合法 json，格式如下：
+{
+  "needs_definition_review": false,
+  "review_fields": [],
+  "review_reason": "",
+  "needs_teacher_review": false
+}
+needs_definition_review 为 false 时，review_fields 必须为空数组，review_reason 必须为空字符串，needs_teacher_review 必须为 false。
+needs_definition_review 为 true 时，review_fields 必须非空，review_reason 必须用一句话说明现有释义需要复核的核心原因。
+needs_teacher_review 为 true 时，needs_definition_review 必须为 true。
+只输出 json，不要补充解释或修改后的释义。"""
+
+REVIEW_FIELDS = {
+    "full_path",
+    "definition",
+    "keywords",
+    "exam_methods",
+    "distinction",
+}
+
 
 def as_text(value: Any) -> str:
     """Convert a worksheet value to stripped text."""
@@ -137,6 +166,24 @@ def build_comparison_messages(
         {
             "role": "user",
             "content": "请比较以下内容并输出 json：\n"
+            + json.dumps(payload, ensure_ascii=False),
+        },
+    ]
+
+
+def build_definition_review_messages(record: dict[str, Any]) -> list[dict[str, str]]:
+    """Build one independent review request from one comparison record."""
+    payload = {
+        "full_path": record["full_path"],
+        "existing_interpretation": record["existing_interpretation"],
+        "generated_interpretation": record["generated_interpretation"],
+        "comparison_analysis": record["comparison_analysis"],
+    }
+    return [
+        {"role": "system", "content": DEFINITION_REVIEW_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": "请独立审核以下一个知识点并输出 json：\n"
             + json.dumps(payload, ensure_ascii=False),
         },
     ]
@@ -245,6 +292,45 @@ class DeepSeekValidator:
             "difference_summary": difference_summary,
             "needs_teacher_review": result["needs_teacher_review"],
         }
+
+    def review_definition(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Decide whether the existing interpretation requires review."""
+        result = self.request_json(build_definition_review_messages(record), 320)
+        required = {
+            "needs_definition_review",
+            "review_fields",
+            "review_reason",
+            "needs_teacher_review",
+        }
+        missing = required.difference(result)
+        if missing:
+            raise ValueError(f"Definition review missing fields: {sorted(missing)}")
+        if not isinstance(result["needs_definition_review"], bool):
+            raise ValueError("needs_definition_review must be a boolean")
+        if not isinstance(result["review_fields"], list) or not all(
+            isinstance(field, str) and field in REVIEW_FIELDS
+            for field in result["review_fields"]
+        ):
+            raise ValueError("review_fields contains an invalid field")
+        if not isinstance(result["review_reason"], str):
+            raise ValueError("review_reason must be a string")
+        if not isinstance(result["needs_teacher_review"], bool):
+            raise ValueError("needs_teacher_review must be a boolean")
+        if result["needs_definition_review"]:
+            if not result["review_fields"] or not result["review_reason"].strip():
+                raise ValueError(
+                    "review_fields and review_reason are required when review is needed"
+                )
+        elif (
+            result["review_fields"]
+            or result["review_reason"]
+            or result["needs_teacher_review"]
+        ):
+            raise ValueError("No review details are allowed when review is not needed")
+        if result["needs_teacher_review"] and not result["needs_definition_review"]:
+            raise ValueError("Teacher review requires definition review")
+
+        return {key: result[key] for key in required}
 
 
 def load_completed_ids(output_jsonl: Path) -> set[str]:
@@ -375,6 +461,107 @@ def load_generated_records(input_jsonl: str) -> dict[str, dict[str, Any]]:
                 raise ValueError(f"Invalid completed generation record at line {line_number}")
             records[label_id] = record
     return records
+
+
+def load_comparison_records(input_jsonl: str) -> list[dict[str, Any]]:
+    """Load completed comparison records with differing understandings."""
+    input_path = Path(input_jsonl)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Comparison results not found: {input_jsonl}")
+
+    records_by_id = {}
+    with input_path.open("r", encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"Invalid JSON in comparison results at line {line_number}: {error}"
+                ) from error
+            if record.get("status") != "completed":
+                continue
+            comparison = record.get("comparison_analysis")
+            if not isinstance(comparison, dict):
+                raise ValueError(f"Invalid completed comparison record at line {line_number}")
+            if comparison.get("same_understanding") is not False:
+                continue
+            label_id = as_text(record.get("label_id"))
+            required = {
+                "full_path",
+                "existing_interpretation",
+                "generated_interpretation",
+            }
+            if not label_id or any(field not in record for field in required):
+                raise ValueError(f"Invalid completed comparison record at line {line_number}")
+            records_by_id[label_id] = record
+
+    return sorted(records_by_id.values(), key=lambda record: record["source_row"])
+
+
+def run_definition_review(
+    records: list[dict[str, Any]],
+    output_jsonl: str,
+    validator: DeepSeekValidator,
+    model: str,
+    limit: int | None,
+) -> dict[str, int]:
+    """Review comparison records strictly one at a time and save immediately."""
+    output_path = Path(output_jsonl)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    completed_ids = load_completed_ids(output_path)
+    pending = [
+        record for record in records if record["label_id"] not in completed_ids
+    ]
+    if limit is not None:
+        pending = pending[:limit]
+
+    summary = {
+        "total_records": len(records),
+        "already_completed": len(completed_ids),
+        "attempted": 0,
+        "completed": 0,
+        "errors": 0,
+    }
+    endpoint = getattr(validator, "base_url", "")
+    with (
+        output_path.open("a", encoding="utf-8") as output_stream,
+        tqdm(total=len(pending), desc="Reviewing definitions") as progress,
+    ):
+        for source in pending:
+            try:
+                review = validator.review_definition(source)
+                result = {
+                    "source_row": source["source_row"],
+                    "label_id": source["label_id"],
+                    "full_path": source["full_path"],
+                    "definition_review": review,
+                    "review_model": model,
+                    "endpoint": endpoint,
+                    "status": "completed",
+                }
+                succeeded = True
+            except Exception as error:
+                result = {
+                    "source_row": source["source_row"],
+                    "label_id": source["label_id"],
+                    "full_path": source["full_path"],
+                    "review_model": model,
+                    "endpoint": endpoint,
+                    "status": "error",
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                }
+                succeeded = False
+
+            summary["attempted"] += 1
+            summary["completed" if succeeded else "errors"] += 1
+            output_stream.write(json.dumps(result, ensure_ascii=False) + "\n")
+            output_stream.flush()
+            progress.update(1)
+
+    return summary
 
 
 def run_comparison(
@@ -591,6 +778,47 @@ def compare_main() -> None:
         generated_records,
         arguments.output_jsonl,
         validators,
+        arguments.model,
+        arguments.limit,
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
+def review_main() -> None:
+    """Review differing comparison records strictly sequentially."""
+    parser = argparse.ArgumentParser(
+        description="Review whether existing label definitions need revision."
+    )
+    parser.add_argument("--input-jsonl", required=True, help="Comparison results")
+    parser.add_argument("--output-jsonl", required=True, help="Definition review results")
+    parser.add_argument(
+        "--model",
+        default=os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL),
+        help="DeepSeek model",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL),
+        help="OpenAI-compatible API base URL",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="Maximum number of new labels to process in this run",
+    )
+    arguments = parser.parse_args()
+    validate_limit(arguments.limit)
+
+    records = load_comparison_records(arguments.input_jsonl)
+    validator = DeepSeekValidator(
+        model=arguments.model,
+        base_url=arguments.base_url,
+        api_key=os.getenv("DEEPSEEK_API_KEY"),
+    )
+    summary = run_definition_review(
+        records,
+        arguments.output_jsonl,
+        validator,
         arguments.model,
         arguments.limit,
     )
