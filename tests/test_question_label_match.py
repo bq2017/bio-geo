@@ -63,3 +63,40 @@ def test_score_pairs_and_resume_without_network(tmp_path, monkeypatch):
     ]
     assert matching.score_units(*arguments)["already_completed"] == 3
     assert len(list(matching.read_jsonl(str(output)))) == 3
+
+
+def test_score_writes_error_details_to_log(tmp_path, monkeypatch):
+    definitions = tmp_path / "definitions.jsonl"
+    units = tmp_path / "units.jsonl"
+    output = tmp_path / "scores.jsonl"
+    log_file = tmp_path / "errors.log"
+    write_jsonl(definitions, [
+        dict(label_id="2", knw_label="知识点@土壤", existing_interpretation=dict.fromkeys(matching.FIELDS, "释义")),
+    ])
+    write_jsonl(units, [
+        dict(question_id="q1", root_question_id="q1", input_role="root", stem="题目", knw_labels=["知识点@土壤"]),
+    ])
+
+    class FailingClient:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+
+        def create(self, **kwargs):
+            raise ConnectionError("connection reset")
+
+    monkeypatch.setattr(matching, "OpenAI", FailingClient)
+    summary = matching.score_units(
+        str(units),
+        str(definitions),
+        str(output),
+        "http://example/v1",
+        "DeepSeek-V4-Flash",
+        log_file=str(log_file),
+    )
+
+    assert summary["errors"] == 1
+    log_text = log_file.read_text(encoding="utf-8")
+    assert "question_id=q1" in log_text
+    assert "knw_label=知识点@土壤" in log_text
+    assert "error_type=ConnectionError" in log_text
+    assert "connection reset" in log_text

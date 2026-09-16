@@ -3,6 +3,7 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,25 @@ SYSTEM_PROMPT = """你是高中地理题目与原有知识点释义的匹配度�
 0.01-0.09：基本无关；0.00：完全无关。
 如果题目明确依赖缺失的图片或图表，现有文字不足以可靠判断，score设为null；不要把缺图当作低匹配。
 只输出JSON对象：{"score":0到1的数字或null,"reason":"一句简短中文理由"}。"""
+
+
+def configure_error_logger(log_file: str | None) -> logging.Logger:
+    """Create a file logger used only for failed question-label requests."""
+    logger = logging.getLogger("question_label_match.errors")
+    logger.handlers.clear()
+    logger.propagate = False
+    if log_file:
+        path = Path(log_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(path, mode="a", encoding="utf-8")
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+        )
+        logger.addHandler(handler)
+        logger.setLevel(logging.ERROR)
+    else:
+        logger.addHandler(logging.NullHandler())
+    return logger
 
 
 def read_jsonl(path: str):
@@ -123,12 +143,14 @@ def score_units(
     workers: int = 1,
     limit: int | None = None,
     timeout: float = 180.0,
+    log_file: str | None = None,
 ) -> dict[str, int]:
     if workers < 1 or limit is not None and limit < 1:
         raise ValueError("workers和limit必须为正整数")
     definitions = load_definitions(definitions_file)
     completed = load_completed(output)
     client = OpenAI(api_key="not-required", base_url=base_url, timeout=timeout, max_retries=0)
+    error_logger = configure_error_logger(log_file)
     summary = {"attempted": 0, "completed": 0, "errors": 0, "already_completed": 0}
 
     def pending_pairs():
@@ -157,6 +179,17 @@ def score_units(
             result["status"] = "completed"
         except Exception as error:
             result.update(status="error", error_type=type(error).__name__, error=str(error))
+            error_logger.error(
+                "question_id=%s root_question_id=%s input_role=%s "
+                "knw_label=%s error_type=%s error=%s",
+                result["question_id"],
+                result["root_question_id"],
+                result["input_role"],
+                label,
+                type(error).__name__,
+                error,
+                exc_info=True,
+            )
         return result
 
     target = Path(output)
@@ -192,11 +225,12 @@ def main() -> None:
     scoring.add_argument("--workers", type=int, default=1)
     scoring.add_argument("--limit", type=int)
     scoring.add_argument("--timeout", type=float, default=180.0)
+    scoring.add_argument("--log-file", required=True, help="Append request errors to this log file")
     arguments = parser.parse_args()
     if arguments.command == "export-definitions":
         print(json.dumps({"definitions": export_definitions(arguments.comparison_jsonl, arguments.output_jsonl)}, ensure_ascii=False))
     else:
-        print(json.dumps(score_units(arguments.input_jsonl, arguments.definitions_jsonl, arguments.output_jsonl, arguments.base_url, arguments.model, arguments.workers, arguments.limit, arguments.timeout), ensure_ascii=False))
+        print(json.dumps(score_units(arguments.input_jsonl, arguments.definitions_jsonl, arguments.output_jsonl, arguments.base_url, arguments.model, arguments.workers, arguments.limit, arguments.timeout, arguments.log_file), ensure_ascii=False))
 
 
 if __name__ == "__main__":

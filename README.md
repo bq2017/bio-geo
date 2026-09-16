@@ -117,6 +117,7 @@ question-label-match score \
   --input-jsonl data/annotation/geography-tagging-units.jsonl \
   --definitions-jsonl data/taxonomy/geography-existing-definitions.jsonl \
   --output-jsonl runs/validation/geography-label-match.jsonl \
+  --log-file runs/logs/geography-label-match-errors.log \
   --base-url http://172.22.0.35:9102/v1 \
   --model DeepSeek-V4-Flash \
   --workers 1 \
