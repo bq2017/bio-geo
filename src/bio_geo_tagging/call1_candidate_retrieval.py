@@ -175,6 +175,36 @@ def validate_result(
     return labels, uncovered_topic
 
 
+def normalize_shard_result(result: Any, allowed_paths: set[str]) -> list[str]:
+    if not isinstance(result, dict):
+        raise ValueError("DS输出不是JSON对象")
+    raw_labels = result.get("candidate_labels")
+    if not isinstance(raw_labels, list) or not all(
+        isinstance(item, str) for item in raw_labels
+    ):
+        raise ValueError("candidate_labels必须是字符串数组")
+
+    labels: list[str] = []
+    seen: set[str] = set()
+    ignored = 0
+    for raw_label in raw_labels:
+        label = raw_label.strip().split("｜", 1)[0].strip()
+        if label and not label.startswith("知识点@"):
+            label = f"知识点@{label}"
+        if label not in allowed_paths:
+            ignored += 1
+            continue
+        if label not in seen:
+            seen.add(label)
+            labels.append(label)
+
+    if len(labels) > 20:
+        raise ValueError(f"本批候选标签超过20个：{len(labels)}")
+    if ignored:
+        logging.info("忽略本批目录外候选：%s个", ignored)
+    return labels
+
+
 def parse_json_object(content: str) -> dict[str, Any]:
     cleaned = content.strip()
     if cleaned.startswith("```"):
@@ -230,7 +260,7 @@ class DeepSeekCandidateRetriever:
             )
             if not content.strip():
                 raise ValueError(f"第{part_number}批DS返回空内容")
-            labels, _ = validate_result(parse_json_object(content), allowed_paths)
+            labels = normalize_shard_result(parse_json_object(content), allowed_paths)
             candidates.extend(labels)
         if len(candidates) > 20:
             raise ValueError(f"三批候选合并后超过20个：{len(candidates)}，未截断")

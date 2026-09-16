@@ -6,6 +6,7 @@ from bio_geo_tagging.call1_candidate_retrieval import (
     build_question_text,
     load_catalog,
     load_units,
+    normalize_shard_result,
     split_catalog,
     validate_result,
 )
@@ -105,6 +106,24 @@ def test_validate_result_accepts_known_unique_labels():
 
     assert labels == ["知识点@标签一", "知识点@标签二"]
     assert uncovered is None
+
+
+def test_normalize_shard_result_repairs_format_and_deduplicates():
+    allowed = {"知识点@自然地理@地球仪", "知识点@自然地理@经纬网"}
+
+    labels = normalize_shard_result(
+        {
+            "candidate_labels": [
+                "自然地理@地球仪",
+                "知识点@自然地理@地球仪｜标签释义",
+                "知识点@自然地理@经纬网",
+                "知识点@其他批次@标签",
+            ]
+        },
+        allowed,
+    )
+
+    assert labels == ["知识点@自然地理@地球仪", "知识点@自然地理@经纬网"]
 
 
 @pytest.mark.parametrize(
