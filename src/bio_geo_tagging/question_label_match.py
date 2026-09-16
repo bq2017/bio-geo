@@ -26,12 +26,14 @@ SYSTEM_PROMPT = """你是高中地理题目与原有知识点释义的匹配度�
 def configure_error_logger(log_file: str | None) -> logging.Logger:
     """Create a file logger used only for failed question-label requests."""
     logger = logging.getLogger("question_label_match.errors")
+    for handler in logger.handlers:
+        handler.close()
     logger.handlers.clear()
     logger.propagate = False
     if log_file:
         path = Path(log_file)
         path.parent.mkdir(parents=True, exist_ok=True)
-        handler = logging.FileHandler(path, mode="a", encoding="utf-8")
+        handler = logging.FileHandler(path, mode="w", encoding="utf-8")
         handler.setFormatter(
             logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
         )
@@ -124,16 +126,6 @@ def request_score(client: OpenAI, model: str, unit: dict, definition: dict) -> d
     return {"score": score, "match": score >= 0.70 if score is not None else None, "reason": reason.strip()}
 
 
-def load_completed(output: str) -> set[tuple[str, str]]:
-    if not Path(output).exists():
-        return set()
-    return {
-        (str(record["question_id"]), record["knw_label"])
-        for _, record in read_jsonl(output)
-        if record.get("status") == "completed"
-    }
-
-
 def score_units(
     units_file: str,
     definitions_file: str,
@@ -148,18 +140,13 @@ def score_units(
     if workers < 1 or limit is not None and limit < 1:
         raise ValueError("workers和limit必须为正整数")
     definitions = load_definitions(definitions_file)
-    completed = load_completed(output)
     client = OpenAI(api_key="not-required", base_url=base_url, timeout=timeout, max_retries=0)
     error_logger = configure_error_logger(log_file)
-    summary = {"attempted": 0, "completed": 0, "errors": 0, "already_completed": 0}
+    summary = {"attempted": 0, "completed": 0, "errors": 0}
 
     def pending_pairs():
         for _, unit in read_jsonl(units_file):
             for label in dict.fromkeys(unit.get("knw_labels", [])):
-                key = (str(unit["question_id"]), label)
-                if key in completed:
-                    summary["already_completed"] += 1
-                    continue
                 yield unit, label
 
     def evaluate(pair):
@@ -194,7 +181,7 @@ def score_units(
 
     target = Path(output)
     target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("a", encoding="utf-8") as stream, ThreadPoolExecutor(max_workers=workers) as pool:
+    with target.open("w", encoding="utf-8") as stream, ThreadPoolExecutor(max_workers=workers) as pool:
         from itertools import islice
         pairs = pending_pairs()
         if limit is not None:

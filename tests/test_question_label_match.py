@@ -27,7 +27,7 @@ def test_export_uses_only_completed_original_definitions(tmp_path):
     ]
 
 
-def test_score_pairs_and_resume_without_network(tmp_path, monkeypatch):
+def test_score_pairs_and_overwrite_without_network(tmp_path, monkeypatch):
     definitions = tmp_path / "definitions.jsonl"
     units = tmp_path / "units.jsonl"
     output = tmp_path / "scores.jsonl"
@@ -61,7 +61,8 @@ def test_score_pairs_and_resume_without_network(tmp_path, monkeypatch):
         ("c", "知识点@降水", None, None),
         ("c", "知识点@土壤", 0.84, True),
     ]
-    assert matching.score_units(*arguments)["already_completed"] == 3
+    output.write_text("stale output\n", encoding="utf-8")
+    assert matching.score_units(*arguments)["completed"] == 3
     assert len(list(matching.read_jsonl(str(output)))) == 3
 
 
@@ -85,6 +86,7 @@ def test_score_writes_error_details_to_log(tmp_path, monkeypatch):
             raise ConnectionError("connection reset")
 
     monkeypatch.setattr(matching, "OpenAI", FailingClient)
+    log_file.write_text("stale error\n", encoding="utf-8")
     summary = matching.score_units(
         str(units),
         str(definitions),
@@ -96,6 +98,7 @@ def test_score_writes_error_details_to_log(tmp_path, monkeypatch):
 
     assert summary["errors"] == 1
     log_text = log_file.read_text(encoding="utf-8")
+    assert "stale error" not in log_text
     assert "question_id=q1" in log_text
     assert "knw_label=知识点@土壤" in log_text
     assert "error_type=ConnectionError" in log_text
