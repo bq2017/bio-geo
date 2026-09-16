@@ -1,6 +1,8 @@
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from bio_geo_tagging import question_label_match as matching
 
 
@@ -36,9 +38,25 @@ def test_score_pairs_and_overwrite_without_network(tmp_path, monkeypatch):
         dict(label_id="3", knw_label="知识点@降水", existing_interpretation=dict.fromkeys(matching.FIELDS, "释义")),
     ])
     write_jsonl(units, [
-        dict(question_id="p", root_question_id="p", input_role="root", stem="公共题干", knw_labels=["知识点@土壤"]),
-        dict(question_id="c", root_question_id="p", input_role="subquestion", context_stem="公共题干", stem="小题", knw_labels=["知识点@降水", "知识点@土壤"]),
+        dict(
+            parent_id="p",
+            question_id="p",
+            stem="公共题干",
+            knw_labels=["知识点@土壤"],
+            sub_questions=[
+                dict(
+                    parent_id="p",
+                    question_id="c",
+                    stem="小题",
+                    options="",
+                    analysis="",
+                    knw_labels=["知识点@降水", "知识点@土壤"],
+                )
+            ],
+        ),
     ])
+
+    payloads = []
 
     class FakeClient:
         def __init__(self, **kwargs):
@@ -46,10 +64,23 @@ def test_score_pairs_and_overwrite_without_network(tmp_path, monkeypatch):
 
         def create(self, **kwargs):
             data = json.loads(kwargs["messages"][1]["content"])
-            if data["stem"] == "小题" and data["knowledge_path"] == "知识点@降水":
-                answer = {"score": None, "reason": "缺少图示"}
+            payloads.append(data)
+            if (
+                data["evaluation_scope"] == "single_subquestion"
+                and data["current_question"]["stem"] == "小题"
+                and data["knowledge_path"] == "知识点@降水"
+            ):
+                answer = {
+                    "judgement": "unjudgeable",
+                    "score": None,
+                    "reason": "缺少图示",
+                }
             else:
-                answer = {"score": 0.84, "reason": "直接考查"}
+                answer = {
+                    "judgement": "scored",
+                    "score": 0.84,
+                    "reason": "直接考查",
+                }
             return [SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=json.dumps(answer, ensure_ascii=False)))])]
 
     monkeypatch.setattr(matching, "OpenAI", FakeClient)
@@ -61,6 +92,25 @@ def test_score_pairs_and_overwrite_without_network(tmp_path, monkeypatch):
         ("c", "知识点@降水", None, None),
         ("c", "知识点@土壤", 0.84, True),
     ]
+    root_payload = next(
+        payload for payload in payloads
+        if payload["evaluation_scope"] == "complete_question_group"
+    )
+    assert root_payload["common_question"]["stem"] == "公共题干"
+    assert root_payload["sub_questions"] == [
+        {
+            "question_id": "c",
+            "stem": "小题",
+            "options": "",
+            "analysis": "",
+        }
+    ]
+    sub_payloads = [
+        payload for payload in payloads
+        if payload["evaluation_scope"] == "single_subquestion"
+    ]
+    assert all(payload["context_stem"] == "公共题干" for payload in sub_payloads)
+    assert all(payload["current_question"]["stem"] == "小题" for payload in sub_payloads)
     output.write_text("stale output\n", encoding="utf-8")
     assert matching.score_units(*arguments)["completed"] == 3
     assert len(list(matching.read_jsonl(str(output)))) == 3
@@ -75,7 +125,13 @@ def test_score_writes_error_details_to_log(tmp_path, monkeypatch):
         dict(label_id="2", knw_label="知识点@土壤", existing_interpretation=dict.fromkeys(matching.FIELDS, "释义")),
     ])
     write_jsonl(units, [
-        dict(question_id="q1", root_question_id="q1", input_role="root", stem="题目", knw_labels=["知识点@土壤"]),
+        dict(
+            parent_id="q1",
+            question_id="q1",
+            stem="题目",
+            knw_labels=["知识点@土壤"],
+            sub_questions=[],
+        ),
     ])
 
     class FailingClient:
@@ -103,3 +159,41 @@ def test_score_writes_error_details_to_log(tmp_path, monkeypatch):
     assert "knw_label=知识点@土壤" in log_text
     assert "error_type=ConnectionError" in log_text
     assert "connection reset" in log_text
+
+
+def test_request_score_rejects_unjudgeable_with_numeric_score():
+    class InvalidClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+
+        def create(self, **kwargs):
+            answer = {
+                "judgement": "unjudgeable",
+                "score": 0.0,
+                "reason": "缺少图示",
+            }
+            return [
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(
+                                content=json.dumps(answer, ensure_ascii=False)
+                            )
+                        )
+                    ]
+                )
+            ]
+
+    unit = {
+        "input_role": "root",
+        "stem": "读图回答",
+        "scoring_sub_questions": [],
+    }
+    definition = {
+        "knw_label": "知识点@土壤",
+        "existing_interpretation": dict.fromkeys(matching.FIELDS, "释义"),
+    }
+    with pytest.raises(ValueError, match="unjudgeable必须对应score=null"):
+        matching.request_score(
+            InvalidClient(), "DeepSeek-V4-Flash", unit, definition
+        )

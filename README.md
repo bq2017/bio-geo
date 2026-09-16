@@ -132,7 +132,7 @@ question-label-match export-definitions \
 
 ```bash
 question-label-match score \
-  --input-jsonl data/annotation/geography-tagging-units.jsonl \
+  --input-jsonl data/processed/geography-merged-with-labels.jsonl \
   --definitions-jsonl data/taxonomy/geography-existing-definitions.jsonl \
   --output-jsonl runs/validation/geography-label-match.jsonl \
   --log-file runs/logs/geography-label-match-errors.log \
@@ -142,10 +142,15 @@ question-label-match score \
   --limit 10
 ```
 
-每个打标单元的每个原标签单独评估。输出 `score`、`reason`，并由代码按
+聚合文件中根题目和每个小题的每个原标签分别评估。输出 `score`、`reason`，并由代码按
 `score >= 0.70` 计算 `match`。缺图无法判断时 `score` 和 `match` 均为
 `null`。每次运行都会覆盖评分结果文件和错误日志，保证当前实验不混入历史记录。
 本步骤不统计分数分布或 ABCD 分类。
+
+根题目的原标签按整道大题评估，输入包含公共题干和全部小题；小题的原标签
+只按“公共题干 + 当前小题”评估。模型必须同时返回 `judgement`：正常评分为
+`scored`，材料不足为 `unjudgeable`。代码会强制检查 `unjudgeable` 必须对应
+`score=null`，避免将缺图题误记为0分。
 
 ## 知识点释义分析
 

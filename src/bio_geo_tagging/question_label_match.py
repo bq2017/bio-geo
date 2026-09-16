@@ -14,13 +14,17 @@ from tqdm import tqdm
 FIELDS = ("definition", "keywords", "exam_methods", "distinction")
 SYSTEM_PROMPT = """你是高中地理题目与原有知识点释义的匹配度评估员。
 只评估当前题目是否实际考查给定知识点，不重新打标，也不判断其他知识点。
-依据知识点完整路径和原有释义判断解题所需知识；共同题干仅供理解小题，不把背景词当作小题考点。
+依据知识点完整路径和原有释义判断解题所需知识。
+evaluation_scope=complete_question_group时，原标签属于整道大题，应结合公共题干和全部小题判断；只要至少一个小题明确考查该知识点，整道大题就可以匹配，不要求每个小题都考查它。
+evaluation_scope=single_subquestion时，只判断当前小题；共同题干仅供理解，不把背景词或其他小题当作当前小题考点。
 常见考查方式是示例，不是穷举；不要仅因未出现相同字词或例题而扣分。解析可以辅助判断，但不能只凭解析中的提及判定考点。
 0.90-1.00：直接核心依据；0.80-0.89：明确考查；0.70-0.79：可归入但偏边界/辅助；
 0.40-0.69：有关联但不足以作为该题知识点；0.10-0.39：背景或弱关联；
 0.01-0.09：基本无关；0.00：完全无关。
-如果题目明确依赖缺失的图片或图表，现有文字不足以可靠判断，score设为null；不要把缺图当作低匹配。
-只输出JSON对象：{"score":0到1的数字或null,"reason":"一句简短中文理由"}。"""
+如果现有题干、选项和解析足以判断，即使图片缺失也正常评分。只有缺失的图片或图表是判断匹配度不可替代的信息时，才判为unjudgeable；不要把材料缺失当作低匹配。
+只输出JSON对象，且必须遵守以下二选一格式：
+可评分：{"judgement":"scored","score":0到1的数字,"reason":"一句简短中文理由"}
+无法判断：{"judgement":"unjudgeable","score":null,"reason":"一句简短中文理由"}。"""
 
 
 def configure_error_logger(log_file: str | None) -> logging.Logger:
@@ -95,16 +99,69 @@ def load_definitions(path: str) -> dict[str, dict[str, Any]]:
     return definitions
 
 
+def build_scoring_units(path: str):
+    """Expand merged records into one complete root and independent sub-questions."""
+    for number, question in read_jsonl(path):
+        root_id = str(question.get("question_id", ""))
+        if not root_id:
+            raise ValueError(f"聚合题目文件第 {number} 行缺少question_id")
+        sub_question_records = question.get("sub_questions", [])
+        if not isinstance(sub_question_records, list):
+            raise ValueError(f"聚合题目文件第 {number} 行的sub_questions不是列表")
+        sub_questions = [
+            {
+                "question_id": str(sub_question.get("question_id", "")),
+                "stem": sub_question.get("stem", ""),
+                "options": sub_question.get("options", ""),
+                "analysis": sub_question.get("analysis", ""),
+            }
+            for sub_question in sub_question_records
+            if isinstance(sub_question, dict)
+        ]
+        if len(sub_questions) != len(sub_question_records):
+            raise ValueError(f"聚合题目文件第 {number} 行包含无效小题记录")
+        root = {
+            key: value
+            for key, value in question.items()
+            if key != "sub_questions"
+        }
+        root["input_role"] = "root"
+        root["root_question_id"] = root_id
+        root["scoring_sub_questions"] = sub_questions
+        yield root
+        for sub_question in sub_question_records:
+            unit = dict(sub_question)
+            unit["input_role"] = "subquestion"
+            unit["root_question_id"] = root_id
+            unit["context_stem"] = question.get("stem", "")
+            yield unit
+
+
 def request_score(client: OpenAI, model: str, unit: dict, definition: dict) -> dict:
-    payload = {
-        "knowledge_path": definition["knw_label"],
-        "existing_interpretation": definition["existing_interpretation"],
-        "input_role": unit.get("input_role"),
-        "context_stem": unit.get("context_stem", ""),
-        "stem": unit.get("stem", ""),
-        "options": unit.get("options", ""),
-        "analysis": unit.get("analysis", ""),
-    }
+    if unit.get("input_role") == "root":
+        payload = {
+            "knowledge_path": definition["knw_label"],
+            "existing_interpretation": definition["existing_interpretation"],
+            "evaluation_scope": "complete_question_group",
+            "common_question": {
+                "stem": unit.get("stem", ""),
+                "options": unit.get("options", ""),
+                "analysis": unit.get("analysis", ""),
+            },
+            "sub_questions": unit.get("scoring_sub_questions", []),
+        }
+    else:
+        payload = {
+            "knowledge_path": definition["knw_label"],
+            "existing_interpretation": definition["existing_interpretation"],
+            "evaluation_scope": "single_subquestion",
+            "context_stem": unit.get("context_stem", ""),
+            "current_question": {
+                "stem": unit.get("stem", ""),
+                "options": unit.get("options", ""),
+                "analysis": unit.get("analysis", ""),
+            },
+        }
     chunks = client.chat.completions.create(
         model=model,
         messages=[
@@ -119,11 +176,27 @@ def request_score(client: OpenAI, model: str, unit: dict, definition: dict) -> d
     if content.startswith("```"):
         content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     answer = json.loads(content)
+    judgement = answer.get("judgement")
     score = answer.get("score")
     reason = answer.get("reason")
-    if (score is not None and (type(score) not in (float, int) or not 0 <= score <= 1)) or not isinstance(reason, str) or not reason.strip():
-        raise ValueError("模型返回的score或reason无效")
-    return {"score": score, "match": score >= 0.70 if score is not None else None, "reason": reason.strip()}
+    if judgement not in {"scored", "unjudgeable"}:
+        raise ValueError("模型返回的judgement无效")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("模型返回的reason无效")
+    if judgement == "unjudgeable":
+        if score is not None:
+            raise ValueError("unjudgeable必须对应score=null")
+        match = None
+    else:
+        if type(score) not in (float, int) or not 0 <= score <= 1:
+            raise ValueError("scored必须对应0到1的score")
+        match = score >= 0.70
+    return {
+        "judgement": judgement,
+        "score": score,
+        "match": match,
+        "reason": reason.strip(),
+    }
 
 
 def score_units(
@@ -145,7 +218,7 @@ def score_units(
     summary = {"attempted": 0, "completed": 0, "errors": 0}
 
     def pending_pairs():
-        for _, unit in read_jsonl(units_file):
+        for unit in build_scoring_units(units_file):
             for label in dict.fromkeys(unit.get("knw_labels", [])):
                 yield unit, label
 
@@ -204,7 +277,7 @@ def main() -> None:
     extraction.add_argument("--comparison-jsonl", required=True)
     extraction.add_argument("--output-jsonl", required=True)
     scoring = commands.add_parser("score")
-    scoring.add_argument("--input-jsonl", required=True)
+    scoring.add_argument("--input-jsonl", required=True, help="Merged question JSONL file")
     scoring.add_argument("--definitions-jsonl", required=True)
     scoring.add_argument("--output-jsonl", required=True)
     scoring.add_argument("--base-url", required=True)
