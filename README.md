@@ -45,10 +45,24 @@ pytest
 question-info-merge `
   --input data/raw/geography.jsonl `
   --output data/processed/geography-merged.jsonl `
-  --log-file runs/logs/geography-question-info-merge.log
+  --log-file runs/logs/geography-question-info-merge.log `
+  --taxonomy data/taxonomy/high-geography-knw-leaf-nodes-0909.json
 ```
 
-该命令保持既有清洗和聚合规则，仅将输入、输出及日志路径改为运行时参数。
+该命令保持既有清洗和聚合规则，并将原始 `knw_ids` 映射为
+`knw_labels`。输出不保留 `knw_ids`。
+
+将聚合结果展开为独立打标单元：
+
+```powershell
+question-tagging-units `
+  --input data/processed/geography-merged.jsonl `
+  --output data/annotation/geography-tagging-units.jsonl `
+  --log-file runs/logs/geography-question-tagging-units.log
+```
+
+根题目和每个小题分别形成一条记录。小题记录通过 `context_stem`
+携带大题公共题干，并保留该小题自己的 `knw_labels`。
 
 ## 知识点释义分析
 

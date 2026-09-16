@@ -130,15 +130,63 @@ def clean_question_info(question_info: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
-def process_file(input_file: str, output_file: str, log_file: str) -> None:
+def load_knowledge_labels(taxonomy_file: str) -> Dict[str, str]:
+    """Load the knowledge point id-to-label mapping."""
+    with open(taxonomy_file, "r", encoding="utf-8") as taxonomy_stream:
+        taxonomy = json.load(taxonomy_stream)
+
+    if not isinstance(taxonomy, dict):
+        raise ValueError("Knowledge taxonomy must be a JSON object")
+
+    return {str(label_id): str(label) for label_id, label in taxonomy.items()}
+
+
+def map_knowledge_labels(
+    knowledge_ids: Any,
+    knowledge_labels: Dict[str, str],
+    question_id: str,
+) -> List[str]:
+    """Map source knw_ids to labels while omitting the ids from output."""
+    if not isinstance(knowledge_ids, list):
+        return []
+
+    labels = []
+    missing_ids = []
+    for knowledge_id in knowledge_ids:
+        normalized_id = str(knowledge_id)
+        label = knowledge_labels.get(normalized_id)
+        if label is None:
+            missing_ids.append(normalized_id)
+        elif label not in labels:
+            labels.append(label)
+
+    if missing_ids:
+        logging.warning(
+            "题目 %s 的知识点ID未在taxonomy中找到: %s",
+            question_id,
+            ", ".join(missing_ids),
+        )
+
+    return labels
+
+
+def process_file(
+    input_file: str,
+    output_file: str,
+    log_file: str,
+    taxonomy_file: str,
+) -> None:
     """Read JSONL records, clean their text, and merge them by parent_id."""
     configure_logging(log_file)
     print(f"开始处理文件: {input_file}")
+    print(f"知识点映射文件: {taxonomy_file}")
     print(f"日志将写入到: {log_file}")
 
     os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
 
     try:
+        knowledge_labels = load_knowledge_labels(taxonomy_file)
+
         print("正在计算文件总行数...")
         with open(input_file, "r", encoding="utf-8") as file:
             total_lines = sum(1 for _ in file)
@@ -181,6 +229,11 @@ def process_file(input_file: str, output_file: str, log_file: str) -> None:
                 answered_count = data.get("answered_count", 0)
                 percent_correct = data.get("percent_correct", 0.0)
                 difficulty = data.get("difficulty", "")
+                current_knw_labels = map_knowledge_labels(
+                    data.get("knw_ids", []),
+                    knowledge_labels,
+                    question_id,
+                )
 
                 if parent_id == question_id:
                     if group_key not in parent_questions:
@@ -194,6 +247,7 @@ def process_file(input_file: str, output_file: str, log_file: str) -> None:
                             "answered_count": answered_count,
                             "percent_correct": percent_correct,
                             "difficulty": difficulty,
+                            "knw_labels": current_knw_labels,
                             "sub_questions": [],
                         }
                     else:
@@ -208,6 +262,9 @@ def process_file(input_file: str, output_file: str, log_file: str) -> None:
                         parent_questions[group_key]["answered_count"] = answered_count
                         parent_questions[group_key]["percent_correct"] = percent_correct
                         parent_questions[group_key]["difficulty"] = difficulty
+                        parent_questions[group_key]["knw_labels"] = (
+                            current_knw_labels
+                        )
                 else:
                     if group_key not in parent_questions:
                         parent_question_info = data.get("parent_question_info", "{}")
@@ -241,6 +298,11 @@ def process_file(input_file: str, output_file: str, log_file: str) -> None:
                             parent_difficulty = parent_question_info.get(
                                 "difficulty", ""
                             )
+                            parent_knw_labels = map_knowledge_labels(
+                                parent_question_info.get("knw_ids", []),
+                                knowledge_labels,
+                                parent_id,
+                            )
                         else:
                             cleaned_parent = {
                                 "stem": "",
@@ -251,6 +313,7 @@ def process_file(input_file: str, output_file: str, log_file: str) -> None:
                             parent_answered_count = answered_count
                             parent_percent_correct = percent_correct
                             parent_difficulty = difficulty
+                            parent_knw_labels = []
 
                         parent_questions[group_key] = {
                             "parent_id": parent_id,
@@ -262,6 +325,7 @@ def process_file(input_file: str, output_file: str, log_file: str) -> None:
                             "answered_count": parent_answered_count,
                             "percent_correct": parent_percent_correct,
                             "difficulty": parent_difficulty,
+                            "knw_labels": parent_knw_labels,
                             "sub_questions": [],
                         }
 
@@ -272,6 +336,7 @@ def process_file(input_file: str, output_file: str, log_file: str) -> None:
                             "stem": cleaned_current["stem"],
                             "options": cleaned_current["options"],
                             "analysis": cleaned_current["analysis"],
+                            "knw_labels": current_knw_labels,
                         }
                     )
 
@@ -299,13 +364,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", required=True, help="Input JSONL file")
     parser.add_argument("--output", required=True, help="Output JSONL file")
     parser.add_argument("--log-file", required=True, help="Processing log file")
+    parser.add_argument(
+        "--taxonomy",
+        required=True,
+        help="JSON mapping knowledge point ids to labels",
+    )
     return parser
 
 
 def main() -> None:
     """Run the command-line interface."""
     arguments = build_parser().parse_args()
-    process_file(arguments.input, arguments.output, arguments.log_file)
+    process_file(
+        arguments.input,
+        arguments.output,
+        arguments.log_file,
+        arguments.taxonomy,
+    )
 
 
 if __name__ == "__main__":

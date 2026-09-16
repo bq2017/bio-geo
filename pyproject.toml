@@ -19,6 +19,7 @@ label-definition-generate = "bio_geo_tagging.label_definition_validation:generat
 label-definition-compare = "bio_geo_tagging.label_definition_validation:compare_main"
 label-definition-review = "bio_geo_tagging.label_definition_validation:review_main"
 question-info-merge = "bio_geo_tagging.question_info_merge:main"
+question-tagging-units = "bio_geo_tagging.question_tagging_units:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
