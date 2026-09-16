@@ -31,19 +31,21 @@ def update_group(
     stem_is_empty: bool,
     has_gold: bool,
     has_unmapped: bool,
+    is_big_question: bool,
 ) -> None:
     connection.execute(
         """
         INSERT INTO groups (
             root_question_id, first_order, unit_count, root_count,
-            has_empty_stem, has_gold, has_unmapped
-        ) VALUES (?, ?, 1, ?, ?, ?, ?)
+            has_empty_stem, has_gold, has_unmapped, is_big_question
+        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?)
         ON CONFLICT(root_question_id) DO UPDATE SET
             unit_count = unit_count + 1,
             root_count = root_count + excluded.root_count,
             has_empty_stem = MAX(has_empty_stem, excluded.has_empty_stem),
             has_gold = MAX(has_gold, excluded.has_gold),
-            has_unmapped = MAX(has_unmapped, excluded.has_unmapped)
+            has_unmapped = MAX(has_unmapped, excluded.has_unmapped),
+            is_big_question = MAX(is_big_question, excluded.is_big_question)
         """,
         (
             root_id,
@@ -52,6 +54,7 @@ def update_group(
             int(stem_is_empty),
             int(has_gold),
             int(has_unmapped),
+            int(is_big_question),
         ),
     )
 
@@ -72,15 +75,35 @@ def profile_groups(
         ):
             raise ValueError(f"题目文件第{line_number}行knw_labels必须是字符串数组")
         labels = {label.strip() for label in labels if label.strip()}
-        input_role = as_text(unit.get("input_role")) or "root"
+        sub_questions = unit.get("sub_questions")
+        is_grouped_record = "sub_questions" in unit
+        if is_grouped_record and (
+            not isinstance(sub_questions, list)
+            or not all(isinstance(question, dict) for question in sub_questions)
+        ):
+            raise ValueError(
+                f"题目文件第{line_number}行sub_questions必须是对象数组"
+            )
+        is_big_question = bool(sub_questions) if is_grouped_record else False
+        if is_grouped_record:
+            input_role = "root"
+            has_empty_stem = (
+                any(not as_text(question.get("stem")) for question in sub_questions)
+                if sub_questions
+                else not as_text(unit.get("stem"))
+            )
+        else:
+            input_role = as_text(unit.get("input_role")) or "root"
+            has_empty_stem = not as_text(unit.get("stem"))
         update_group(
             connection,
             root_id,
             total_units,
             input_role == "root",
-            not as_text(unit.get("stem")),
+            has_empty_stem,
             bool(labels),
             any(label not in allowed_paths for label in labels),
+            is_big_question,
         )
         total_units += 1
         if total_units % 10_000 == 0:
@@ -167,7 +190,8 @@ def sample_groups(
                     root_count INTEGER,
                     has_empty_stem INTEGER,
                     has_gold INTEGER,
-                    has_unmapped INTEGER
+                    has_unmapped INTEGER,
+                    is_big_question INTEGER
                 )
                 """
             )
@@ -191,7 +215,8 @@ def sample_groups(
             sampled_big_questions = sum(
                 1
                 for root_id, unit_count in connection.execute(
-                    "SELECT root_question_id, unit_count FROM groups WHERE unit_count > 1"
+                    """SELECT root_question_id, unit_count FROM groups
+                       WHERE unit_count > 1 OR is_big_question = 1"""
                 )
                 if root_id in sampled_ids
             )

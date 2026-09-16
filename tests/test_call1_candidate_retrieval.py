@@ -4,6 +4,7 @@ import pytest
 
 from bio_geo_tagging.call1_candidate_retrieval import (
     build_question_text,
+    get_input_role,
     load_catalog,
     load_units,
     normalize_shard_result,
@@ -64,6 +65,45 @@ def test_build_question_text_separates_context_and_excludes_existing_labels():
     assert "【解析】\n解析内容" in rendered
     assert "【图片描述】\n等高线图" in rendered
     assert "不应泄漏" not in rendered
+
+
+def test_build_question_text_renders_complete_group_without_labels():
+    unit = {
+        "question_id": "root-1",
+        "parent_id": "root-1",
+        "stem": "公共材料",
+        "knw_labels": ["知识点@整题旧标签"],
+        "sub_questions": [
+            {
+                "question_id": "child-1",
+                "stem": "小题一",
+                "options": "A. 甲\nB. 乙",
+                "analysis": "小题一解析",
+                "knw_labels": ["知识点@小题一旧标签"],
+            },
+            {
+                "question_id": "child-2",
+                "stem": "小题二",
+                "options": "A. 丙\nB. 丁",
+                "answer": "B",
+                "analysis": "小题二解析",
+                "knw_labels": ["知识点@小题二旧标签"],
+            },
+        ],
+    }
+
+    rendered = build_question_text(unit)
+
+    assert "【整道题公共材料】\n公共材料" in rendered
+    assert "【小题1】\n小题一" in rendered
+    assert "【小题1选项】\nA. 甲\nB. 乙" in rendered
+    assert "【小题1解析】\n小题一解析" in rendered
+    assert "【小题2】\n小题二" in rendered
+    assert "【小题2答案】\nB" in rendered
+    assert "整题旧标签" not in rendered
+    assert "小题一旧标签" not in rendered
+    assert "小题二旧标签" not in rendered
+    assert get_input_role(unit) == "question_group"
 
 
 def test_load_units_skips_empty_root_but_keeps_its_subquestion(tmp_path):

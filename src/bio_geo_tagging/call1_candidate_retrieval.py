@@ -25,8 +25,8 @@ SYSTEM_PROMPT = """你是高中地理知识点候选标签召回器。
 你的任务是独立理解当前打标对象，从本批给定的标签中找出所有可能成为最终答案的候选标签。本阶段只追求候选召回，不确定的相邻标签可以同时保留，不做最终取舍。另有其他批次的标签分别处理，你只判断本批标签。
 
 判断要求：
-1. 公共题干只用于理解当前打标对象。仅出现在公共题干中、但不参与当前设问解答的知识不能进入候选。
-2. 结合题干、选项、已有答案和解析，判断完成当前设问实际需要的地理知识。
+1. 输入为整道题时，公共题干和全部小题共同构成打标对象，需要覆盖各小题知识以及整题综合知识；输入为单个小题时，公共题干只用于理解当前小题。
+2. 结合题干、全部小题、选项、已有答案和解析，判断完成题目实际需要的地理知识。
 3. 错误选项涉及的知识、解析中的延伸知识和一般性背景知识不作为候选。
 4. 只能返回标签目录中存在的完整标签路径，不补充父级、兄弟或层级近邻标签。
 5. 候选最多20个，不要求凑满。
@@ -40,7 +40,7 @@ SYSTEM_PROMPT = """你是高中地理知识点候选标签召回器。
 
 CONSOLIDATION_PROMPT = """你是高中地理知识点候选标签召回器。
 
-三批标签召回结果已经合并，但候选数量超过20个。请重新根据题目判断，只保留完成当前设问可能实际使用的知识点。公共题干只用于理解当前设问；错误选项、背景知识、延伸知识以及仅因主题相近而出现的标签不能保留。
+三批标签召回结果已经合并，但候选数量超过20个。请重新根据题目判断，只保留完成当前打标对象可能实际使用的知识点。输入为整道题时需要覆盖全部小题及整题综合知识；输入为单个小题时公共题干只用于理解当前小题。错误选项、背景知识、延伸知识以及仅因主题相近而出现的标签不能保留。
 
 只能从下面的候选中选择，最多20个，不要求凑满。输出一个JSON对象：
 {"candidate_labels":["完整标签路径"]}
@@ -109,8 +109,27 @@ def make_unit_key(unit: dict[str, Any]) -> str:
         or unit.get("parent_id")
         or question_id
     )
-    input_role = as_text(unit.get("input_role")) or "root"
+    input_role = get_input_role(unit)
     return f"{root_question_id}|{question_id}|{input_role}"
+
+
+def get_input_role(unit: dict[str, Any]) -> str:
+    explicit_role = as_text(unit.get("input_role"))
+    if explicit_role:
+        return explicit_role
+    if "sub_questions" in unit:
+        return "question_group"
+    return "root"
+
+
+def has_question_content(unit: dict[str, Any]) -> bool:
+    if as_text(unit.get("stem")):
+        return True
+    sub_questions = unit.get("sub_questions")
+    return isinstance(sub_questions, list) and any(
+        isinstance(question, dict) and as_text(question.get("stem"))
+        for question in sub_questions
+    )
 
 
 def load_units(input_path: Path) -> tuple[list[dict[str, Any]], int]:
@@ -127,11 +146,19 @@ def load_units(input_path: Path) -> tuple[list[dict[str, Any]], int]:
                 raise ValueError(f"题目文件第{line_number}行JSON无效：{error}") from error
             if not isinstance(unit, dict):
                 raise ValueError(f"题目文件第{line_number}行不是JSON对象")
+            if "sub_questions" in unit:
+                sub_questions = unit.get("sub_questions")
+                if not isinstance(sub_questions, list) or not all(
+                    isinstance(question, dict) for question in sub_questions
+                ):
+                    raise ValueError(
+                        f"题目文件第{line_number}行sub_questions必须是对象数组"
+                    )
             unit_key = make_unit_key(unit)
             if unit_key in seen_keys:
                 raise ValueError(f"题目文件存在重复打标单元：{unit_key}")
             seen_keys.add(unit_key)
-            if not as_text(unit.get("stem")):
+            if not has_question_content(unit):
                 skipped_empty_stem += 1
                 logging.warning("跳过题干为空的打标单元：%s", unit_key)
                 continue
@@ -141,6 +168,9 @@ def load_units(input_path: Path) -> tuple[list[dict[str, Any]], int]:
 
 def build_question_text(unit: dict[str, Any]) -> str:
     """Render only fields allowed to reach DS; existing labels are excluded."""
+    if "sub_questions" in unit:
+        return build_group_question_text(unit)
+
     sections: list[str] = []
     context_stem = render_value(unit.get("context_stem"))
     if context_stem:
@@ -157,6 +187,44 @@ def build_question_text(unit: dict[str, Any]) -> str:
     image_description = render_value(unit.get("image_description"))
     if image_description:
         sections.append(f"【图片描述】\n{image_description}")
+    return "\n\n".join(sections)
+
+
+def append_question_fields(
+    sections: list[str], question: dict[str, Any], heading: str
+) -> None:
+    sections.append(f"【{heading}】\n{render_value(question.get('stem'))}")
+    options = render_value(question.get("options"))
+    if options:
+        sections.append(f"【{heading}选项】\n{options}")
+    answer = render_value(question.get("answer"))
+    if answer:
+        sections.append(f"【{heading}答案】\n{answer}")
+    analysis = question.get("analysis")
+    if analysis is None:
+        analysis = question.get("explanation")
+    rendered_analysis = render_value(analysis)
+    if rendered_analysis:
+        sections.append(f"【{heading}解析】\n{rendered_analysis}")
+    image_description = render_value(question.get("image_description"))
+    if image_description:
+        sections.append(f"【{heading}图片描述】\n{image_description}")
+
+
+def build_group_question_text(unit: dict[str, Any]) -> str:
+    sub_questions = unit.get("sub_questions") or []
+    sections: list[str] = []
+    if sub_questions:
+        shared_stem = render_value(unit.get("stem"))
+        if shared_stem:
+            sections.append(f"【整道题公共材料】\n{shared_stem}")
+        root_image = render_value(unit.get("image_description"))
+        if root_image:
+            sections.append(f"【整道题公共图片描述】\n{root_image}")
+        for index, question in enumerate(sub_questions, start=1):
+            append_question_fields(sections, question, f"小题{index}")
+    else:
+        append_question_fields(sections, unit, "题目")
     return "\n\n".join(sections)
 
 
@@ -409,7 +477,7 @@ def run_retrieval(
                         or unit.get("parent_id")
                         or unit.get("question_id")
                     ),
-                    "input_role": as_text(unit.get("input_role")) or "root",
+                    "input_role": get_input_role(unit),
                     "candidate_labels": candidate_labels,
                     "uncovered_topic": uncovered_topic,
                     "model": model,

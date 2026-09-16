@@ -64,33 +64,38 @@ question-tagging-units `
 根题目和每个小题分别形成一条记录。小题记录通过 `context_stem`
 携带大题公共题干，并保留该小题自己的 `knw_labels`。
 
-按完整题组随机抽取1000道原始题用于候选召回检测：
+`geography-tagging-units.jsonl` 保留给后续调用二使用。调用一不读取展开后的
+小题记录，而是直接读取每行一整道原题的聚合数据。
+
+按完整原题随机抽取30道题用于候选召回小测试：
 
 ```bash
 question-tagging-sample \
-  --input data/annotation/geography-tagging-units.jsonl \
+  --input data/processed/geography-merged-with-labels.jsonl \
   --catalog data/processed/geography-labels-call1-catalog.txt \
-  --output data/annotation/geography-tagging-sample-1000.jsonl \
-  --summary-output runs/tagging/geography-tagging-sample-1000-summary.json \
-  --groups 1000 \
+  --output data/annotation/geography-whole-question-sample-30.jsonl \
+  --summary-output runs/tagging/geography-whole-question-sample-30-summary.json \
+  --groups 30 \
   --seed 20260916
 ```
 
-抽样单位是 `root_question_id`。普通题保留一条记录；大题同时保留根题目和全部
-小题。题干为空、没有原标签、原标签不属于当前414标签或缺少根题目的题组不
-进入样本。
+聚合数据中的每一行就是一道完整原题。普通题保留自身；大题在同一条记录中
+保留公共题干和全部 `sub_questions`。没有可用题目内容、没有原标签或原标签
+不属于当前414标签的题目不进入样本。正式抽取1000题时只需把文件名中的
+`30` 和 `--groups 30` 改为 `1000`。
 
 ## 调用一：候选标签召回
 
-调用一读取独立打标单元和414条简明标签目录。为避免超过模型上下文限制，
-脚本把目录均分为三批，对同一道题分别召回后合并候选：
+调用一读取完整原题和414条简明标签目录。一道普通题调用一次完整流程；一道
+大题把公共题干和全部小题作为一个整体调用一次完整流程，得到整道题共用的
+候选集合。为避免超过模型上下文限制，脚本把目录均分为三批，分别召回后合并：
 
 ```bash
 question-label-candidates \
-  --input data/annotation/geography-tagging-units.jsonl \
+  --input data/annotation/geography-whole-question-sample-30.jsonl \
   --catalog data/processed/geography-labels-call1-catalog.txt \
-  --output runs/tagging/geography-call1-candidates.jsonl \
-  --log-file runs/logs/geography-call1-candidates.log \
+  --output runs/tagging/geography-call1-whole-question-sample-30-candidates.jsonl \
+  --log-file runs/logs/geography-call1-whole-question-sample-30-candidates.log \
   --base-url http://172.22.0.35:9204/v1 \
   --model DeepSeek-V4-Flash \
   --concurrency 10
@@ -105,18 +110,16 @@ question-label-candidates \
 
 ```bash
 question-label-candidates-evaluate \
-  --input data/annotation/geography-tagging-units.jsonl \
-  --candidates runs/tagging/geography-call1-candidates.jsonl \
+  --input data/annotation/geography-whole-question-sample-30.jsonl \
+  --candidates runs/tagging/geography-call1-whole-question-sample-30-candidates.jsonl \
   --catalog data/processed/geography-labels-call1-catalog.txt \
-  --summary-output runs/tagging/geography-call1-evaluation-summary.json \
-  --missing-output runs/tagging/geography-call1-missed-labels.jsonl \
-  --group-by-root
+  --summary-output runs/tagging/geography-call1-whole-question-sample-30-evaluation-summary.json \
+  --missing-output runs/tagging/geography-call1-whole-question-sample-30-missed-labels.jsonl
 ```
 
-`--group-by-root` 会先合并根题目和全部小题的候选，再与整道题重复保存的
-`knw_labels` 比较。汇总文件记录全量覆盖率和逐标签召回率；明细文件记录漏召回
-标签以及无法与当前414个标签对应的 `knw_labels`。候选尚未全部生成时也可以
-运行，未完整完成的题组不会进入召回率分母。
+每条候选结果直接与同一道完整原题顶层的 `knw_labels` 比较，不再合并多个
+打标单元，因此不使用 `--group-by-root`。汇总文件记录全量覆盖率和逐标签
+召回率；明细文件记录漏召回标签以及无法与当前414个标签对应的原标签。
 
 ## 原标签与原释义匹配评分
 

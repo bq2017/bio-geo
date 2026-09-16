@@ -190,3 +190,52 @@ def test_evaluate_files_groups_complete_question_by_root(tmp_path):
     assert summary["units_without_candidate_result"] == 1
     assert summary["by_group_type"]["big_question"]["fully_covered_groups"] == 1
     assert missing_path.read_text(encoding="utf-8") == ""
+
+
+def test_evaluate_files_accepts_one_nested_complete_question(tmp_path):
+    catalog = tmp_path / "catalog.txt"
+    catalog.write_text(
+        "\n".join(f"知识点@标签{index}｜释义{index}" for index in range(414))
+        + "\n",
+        encoding="utf-8",
+    )
+    units = [
+        {
+            "question_id": "root",
+            "parent_id": "root",
+            "stem": "",
+            "knw_labels": ["知识点@标签1", "知识点@标签2"],
+            "sub_questions": [
+                {"question_id": "child-1", "stem": "小题一"},
+                {"question_id": "child-2", "stem": "小题二"},
+            ],
+        }
+    ]
+    candidates = [
+        {
+            "unit_key": "root|root|question_group",
+            "candidate_labels": ["知识点@标签1"],
+            "uncovered_topic": None,
+            "status": "completed",
+        }
+    ]
+    input_path = tmp_path / "questions.jsonl"
+    candidates_path = tmp_path / "candidates.jsonl"
+    summary_path = tmp_path / "summary.json"
+    missing_path = tmp_path / "missing.jsonl"
+    write_jsonl(input_path, units)
+    write_jsonl(candidates_path, candidates)
+
+    summary = evaluate_files(
+        input_path, candidates_path, catalog, summary_path, missing_path
+    )
+
+    assert summary["eligible_input_units"] == 1
+    assert summary["skipped_empty_stem"] == 0
+    assert summary["evaluated_units"] == 1
+    assert summary["full_coverage_rate"] == 0.0
+    assert summary["label_recall"] == 0.5
+    assert summary["by_input_role"]["question_group"]["evaluated_units"] == 1
+    detail = json.loads(missing_path.read_text(encoding="utf-8"))
+    assert detail["unit_key"] == "root|root|question_group"
+    assert detail["missing_labels"] == ["知识点@标签2"]

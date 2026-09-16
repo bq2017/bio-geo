@@ -111,3 +111,53 @@ def test_sample_groups_keeps_complete_eligible_groups(tmp_path):
     assert summary["excluded_no_gold_groups"] == 1
     assert summary["excluded_unmapped_groups"] == 1
     assert summary["excluded_invalid_structure_groups"] == 1
+
+
+def test_sample_groups_accepts_nested_complete_questions(tmp_path):
+    catalog = tmp_path / "catalog.txt"
+    catalog.write_text(
+        "\n".join(f"知识点@标签{index}｜释义{index}" for index in range(414))
+        + "\n",
+        encoding="utf-8",
+    )
+    questions = [
+        {
+            "parent_id": "big",
+            "question_id": "big",
+            "stem": "公共材料",
+            "knw_labels": ["知识点@标签0"],
+            "sub_questions": [
+                {"question_id": "child-1", "stem": "小题一"},
+                {"question_id": "child-2", "stem": "小题二"},
+            ],
+        },
+        {
+            "parent_id": "ordinary",
+            "question_id": "ordinary",
+            "stem": "普通题",
+            "knw_labels": ["知识点@标签1"],
+            "sub_questions": [],
+        },
+    ]
+    input_path = tmp_path / "questions.jsonl"
+    output_path = tmp_path / "sample.jsonl"
+    summary_path = tmp_path / "summary.json"
+    write_jsonl(input_path, questions)
+
+    summary = sample_groups(
+        input_path,
+        catalog,
+        output_path,
+        summary_path,
+        group_count=2,
+        seed=7,
+    )
+
+    sampled = [
+        json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert sampled == questions
+    assert summary["sampled_groups"] == 2
+    assert summary["sampled_units"] == 2
+    assert summary["sampled_big_questions"] == 1
+    assert summary["sampled_ordinary_questions"] == 1

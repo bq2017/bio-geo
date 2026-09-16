@@ -12,6 +12,8 @@ from typing import Any
 
 from .call1_candidate_retrieval import (
     as_text,
+    get_input_role,
+    has_question_content,
     load_catalog,
     make_unit_key,
     validate_result,
@@ -40,7 +42,7 @@ def load_units_to_db(
     rows: list[tuple[str, str, str, str, str]] = []
     for line_number, unit in read_jsonl(input_path):
         unit_key = make_unit_key(unit)
-        if not as_text(unit.get("stem")):
+        if not has_question_content(unit):
             skipped_empty_stem += 1
             continue
         labels = unit.get("knw_labels")
@@ -60,7 +62,7 @@ def load_units_to_db(
                     or unit.get("parent_id")
                     or unit.get("question_id")
                 ),
-                as_text(unit.get("input_role")) or "root",
+                get_input_role(unit),
                 json.dumps(labels, ensure_ascii=False),
             )
         )
