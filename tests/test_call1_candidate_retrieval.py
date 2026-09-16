@@ -6,6 +6,7 @@ from bio_geo_tagging.call1_candidate_retrieval import (
     build_question_text,
     load_catalog,
     load_units,
+    split_catalog,
     validate_result,
 )
 
@@ -24,6 +25,19 @@ def test_load_catalog_returns_exact_paths(tmp_path):
         "知识点@人文地理@标签二｜释义二",
     ]
     assert paths == {"知识点@自然地理@标签一", "知识点@人文地理@标签二"}
+
+
+def test_split_catalog_covers_each_label_once():
+    catalog = "\n".join(
+        f"知识点@标签{index}｜释义{index}" for index in range(10)
+    )
+
+    parts = split_catalog(catalog, parts=3)
+
+    assert [len(paths) for _, paths in parts] == [4, 3, 3]
+    all_paths = [path for _, paths in parts for path in paths]
+    assert len(all_paths) == len(set(all_paths)) == 10
+    assert set(all_paths) == {f"知识点@标签{index}" for index in range(10)}
 
 
 def test_build_question_text_separates_context_and_excludes_existing_labels():

@@ -21,7 +21,7 @@ EXPECTED_LABEL_COUNT = 414
 
 SYSTEM_PROMPT = """你是高中地理知识点候选标签召回器。
 
-你的任务是独立理解当前打标对象，从给定的414个标签中找出所有可能成为最终答案的候选标签。本阶段只追求候选召回，不确定的相邻标签可以同时保留，不做最终取舍。
+你的任务是独立理解当前打标对象，从本批给定的标签中找出所有可能成为最终答案的候选标签。本阶段只追求候选召回，不确定的相邻标签可以同时保留，不做最终取舍。另有其他批次的标签分别处理，你只判断本批标签。
 
 判断要求：
 1. 公共题干只用于理解当前打标对象。仅出现在公共题干中、但不参与当前设问解答的知识不能进入候选。
@@ -29,10 +29,9 @@ SYSTEM_PROMPT = """你是高中地理知识点候选标签召回器。
 3. 错误选项涉及的知识、解析中的延伸知识和一般性背景知识不作为候选。
 4. 只能返回标签目录中存在的完整标签路径，不补充父级、兄弟或层级近邻标签。
 5. 候选最多20个，不要求凑满。
-6. 如果标签目录不能覆盖题目考查内容，在uncovered_topic中简要说明缺失内容。
 
 输出一个JSON对象：
-{"candidate_labels":["完整标签路径"],"uncovered_topic":null}
+{"candidate_labels":["完整标签路径"]}
 
 【标签目录】
 {catalog}
@@ -76,6 +75,17 @@ def load_catalog(
     if len(set(paths)) != len(paths):
         raise ValueError("标签目录存在重复路径")
     return "\n".join(lines), set(paths)
+
+
+def split_catalog(catalog: str, parts: int = 3) -> list[tuple[str, set[str]]]:
+    if parts <= 0:
+        raise ValueError("标签目录分批数必须大于0")
+    lines = catalog.splitlines()
+    chunks = [lines[index::parts] for index in range(parts)]
+    return [
+        ("\n".join(chunk), {line.split("｜", 1)[0].strip() for line in chunk})
+        for chunk in chunks
+    ]
 
 
 def make_unit_key(unit: dict[str, Any]) -> str:
@@ -179,8 +189,7 @@ def parse_json_object(content: str) -> dict[str, Any]:
 class DeepSeekCandidateRetriever:
     def __init__(
         self,
-        catalog: str,
-        allowed_paths: set[str],
+        catalog_parts: list[tuple[str, set[str]]],
         model: str,
         base_url: str,
         api_key: str | None,
@@ -192,29 +201,40 @@ class DeepSeekCandidateRetriever:
             timeout=timeout,
             max_retries=1,
         )
-        self.system_prompt = SYSTEM_PROMPT.replace("{catalog}", catalog)
-        self.allowed_paths = allowed_paths
+        self.catalog_parts = [
+            (SYSTEM_PROMPT.replace("{catalog}", catalog), allowed_paths)
+            for catalog, allowed_paths in catalog_parts
+        ]
         self.model = model
 
     def retrieve(self, unit: dict[str, Any]) -> tuple[list[str], str | None]:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": build_question_text(unit)},
-            ],
-            max_tokens=1024,
-            stream=True,
-            temperature=0,
-        )
-        content = "".join(
-            chunk.choices[0].delta.content or ""
-            for chunk in response
-            if chunk.choices
-        )
-        if not content.strip():
-            raise ValueError("DS返回空内容")
-        return validate_result(parse_json_object(content), self.allowed_paths)
+        question_text = build_question_text(unit)
+        candidates: list[str] = []
+        for part_number, (system_prompt, allowed_paths) in enumerate(
+            self.catalog_parts, start=1
+        ):
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": question_text},
+                ],
+                max_tokens=1024,
+                stream=True,
+                temperature=0,
+            )
+            content = "".join(
+                chunk.choices[0].delta.content or ""
+                for chunk in response
+                if chunk.choices
+            )
+            if not content.strip():
+                raise ValueError(f"第{part_number}批DS返回空内容")
+            labels, _ = validate_result(parse_json_object(content), allowed_paths)
+            candidates.extend(labels)
+        if len(candidates) > 20:
+            raise ValueError(f"三批候选合并后超过20个：{len(candidates)}，未截断")
+        return candidates, None
 
 
 def load_completed(output_path: Path) -> dict[str, dict[str, Any]]:
@@ -253,6 +273,7 @@ def run_retrieval(
     limit: int | None,
 ) -> dict[str, int]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    catalog_parts = split_catalog(catalog)
     completed = load_completed(output_path)
     unit_keys = {make_unit_key(unit) for unit in units}
     stale_keys = set(completed).difference(unit_keys)
@@ -274,8 +295,7 @@ def run_retrieval(
         with retriever_lock:
             if thread_id not in thread_local_retrievers:
                 thread_local_retrievers[thread_id] = DeepSeekCandidateRetriever(
-                    catalog,
-                    allowed_paths,
+                    catalog_parts,
                     model,
                     base_url,
                     api_key,
