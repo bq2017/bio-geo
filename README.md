@@ -138,7 +138,7 @@ question-label-match score \
   --input-jsonl data/processed/geography-merged-with-labels.jsonl \
   --definitions-jsonl data/taxonomy/geography-existing-definitions.jsonl \
   --output-jsonl runs/validation/geography-label-match.jsonl \
-  --log-file runs/logs/geography-label-match-errors.log \
+  --log-file runs/logs/geography-label-match.log \
   --base-url http://172.22.0.35:9102/v1 \
   --model DeepSeek-V4-Flash \
   --workers 1 \
@@ -148,8 +148,11 @@ question-label-match score \
 每条聚合记录作为一道完整大题，只评估大题自身 `knw_labels` 中的原标签。模型输入包含
 公共题干和全部小题，不单独生成小题评分。输出 `score`、`reason`，并由代码按
 `score >= 0.70` 计算 `match`。缺图无法判断时 `score` 和 `match` 均为
-`null`。每次运行都会覆盖评分结果文件和错误日志，保证当前实验不混入历史记录。
+`null`。每次运行都会覆盖评分结果文件和运行日志，保证当前实验不混入历史记录。
 本步骤不统计分数分布或 ABCD 分类。
+
+运行日志会记录总任务数、每条任务的完成状态、当前进度、累计耗时和最终汇总，
+可使用 `tail -f runs/logs/geography-label-match.log` 实时查看。
 
 模型必须同时返回 `judgement`：正常评分为
 `scored`，材料不足为 `unjudgeable`。代码会强制检查 `unjudgeable` 必须对应

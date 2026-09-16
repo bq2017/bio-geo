@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 from pathlib import Path
+import time
 from typing import Any
 
 from openai import OpenAI
@@ -26,9 +27,9 @@ SYSTEM_PROMPT = """你是高中地理题目与原有知识点释义的匹配度�
 无法判断：{"judgement":"unjudgeable","score":null,"reason":"一句简短中文理由"}。"""
 
 
-def configure_error_logger(log_file: str | None) -> logging.Logger:
-    """Create a file logger used only for failed question-label requests."""
-    logger = logging.getLogger("question_label_match.errors")
+def configure_run_logger(log_file: str | None) -> logging.Logger:
+    """Create an overwritten log for progress, results, and request errors."""
+    logger = logging.getLogger("question_label_match.run")
     for handler in logger.handlers:
         handler.close()
     logger.handlers.clear()
@@ -41,7 +42,7 @@ def configure_error_logger(log_file: str | None) -> logging.Logger:
             logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
         )
         logger.addHandler(handler)
-        logger.setLevel(logging.ERROR)
+        logger.setLevel(logging.INFO)
     else:
         logger.addHandler(logging.NullHandler())
     return logger
@@ -186,13 +187,32 @@ def score_units(
         raise ValueError("workers和limit必须为正整数")
     definitions = load_definitions(definitions_file)
     client = OpenAI(api_key="not-required", base_url=base_url, timeout=timeout, max_retries=0)
-    error_logger = configure_error_logger(log_file)
+    run_logger = configure_run_logger(log_file)
     summary = {"attempted": 0, "completed": 0, "errors": 0}
 
     def pending_pairs():
         for unit in read_complete_questions(units_file):
             for label in dict.fromkeys(unit.get("knw_labels", [])):
                 yield unit, label
+
+    total_pairs = sum(
+        len(dict.fromkeys(unit.get("knw_labels", [])))
+        for unit in read_complete_questions(units_file)
+    )
+    if limit is not None:
+        total_pairs = min(total_pairs, limit)
+    started_at = time.monotonic()
+    run_logger.info(
+        "run_started input=%s output=%s total_pairs=%s workers=%s "
+        "timeout=%s model=%s base_url=%s",
+        units_file,
+        output,
+        total_pairs,
+        workers,
+        timeout,
+        model,
+        base_url,
+    )
 
     def evaluate(pair):
         unit, label = pair
@@ -209,7 +229,7 @@ def score_units(
             result["status"] = "completed"
         except Exception as error:
             result.update(status="error", error_type=type(error).__name__, error=str(error))
-            error_logger.error(
+            run_logger.error(
                 "question_id=%s knw_label=%s error_type=%s error=%s",
                 result["question_id"],
                 label,
@@ -226,14 +246,33 @@ def score_units(
         pairs = pending_pairs()
         if limit is not None:
             pairs = islice(pairs, limit)
-        with tqdm(desc="Scoring question-label pairs") as progress:
+        with tqdm(total=total_pairs, desc="Scoring question-label pairs") as progress:
             while batch := list(islice(pairs, workers * 2)):
                 for result in pool.map(evaluate, batch):
                     stream.write(json.dumps(result, ensure_ascii=False) + "\n")
                     stream.flush()
                     summary["attempted"] += 1
                     summary["completed" if result["status"] == "completed" else "errors"] += 1
+                    run_logger.info(
+                        "progress=%s/%s status=%s question_id=%s label_id=%s "
+                        "score=%s match=%s elapsed=%.1fs",
+                        summary["attempted"],
+                        total_pairs,
+                        result["status"],
+                        result["question_id"],
+                        result.get("label_id"),
+                        result.get("score"),
+                        result.get("match"),
+                        time.monotonic() - started_at,
+                    )
                     progress.update(1)
+    run_logger.info(
+        "run_finished attempted=%s completed=%s errors=%s elapsed=%.1fs",
+        summary["attempted"],
+        summary["completed"],
+        summary["errors"],
+        time.monotonic() - started_at,
+    )
     return summary
 
 
@@ -252,7 +291,11 @@ def main() -> None:
     scoring.add_argument("--workers", type=int, default=1)
     scoring.add_argument("--limit", type=int)
     scoring.add_argument("--timeout", type=float, default=180.0)
-    scoring.add_argument("--log-file", required=True, help="Append request errors to this log file")
+    scoring.add_argument(
+        "--log-file",
+        required=True,
+        help="Overwrite this file with run progress and request errors",
+    )
     arguments = parser.parse_args()
     if arguments.command == "export-definitions":
         print(json.dumps({"definitions": export_definitions(arguments.comparison_jsonl, arguments.output_jsonl)}, ensure_ascii=False))

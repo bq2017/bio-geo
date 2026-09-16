@@ -140,6 +140,9 @@ def test_score_writes_error_details_to_log(tmp_path, monkeypatch):
     assert "knw_label=知识点@土壤" in log_text
     assert "error_type=ConnectionError" in log_text
     assert "connection reset" in log_text
+    assert "run_started" in log_text
+    assert "progress=1/1 status=error" in log_text
+    assert "run_finished attempted=1 completed=0 errors=1" in log_text
 
 
 def test_request_score_rejects_unjudgeable_with_numeric_score():
