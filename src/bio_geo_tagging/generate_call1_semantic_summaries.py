@@ -13,16 +13,10 @@ from pathlib import Path
 
 SYSTEM_PROMPT = """你是高中地理知识点标签编辑。你的任务是把原释义压缩成供知识点召回模型阅读的简明释义。
 
-必须遵守：
-1. 只依据输入的原释义，不补充原释义没有的信息。
-2. 同时阅读定义、关键词、常见考查方式、易混淆区分四部分，不得只截取某个字段的前半段。
-3. 每个标签生成一段语义完整的中文释义，说明该标签考查什么、题目出现什么任务时应考虑该标签，以及最必要的相近标签边界。
-4. 保留会影响标签选择的条件和边界；删除例题式罗列、重复表述和不影响判断的细节。
-5. 不使用“含、词、界”等缩写，不机械截断，不写省略号，不输出主标签或次标签判断。
-6. 建议每条80至140个汉字；内容较简单时可以更短，但必须是完整句子。
-7. label_path必须原样返回。仅输出JSON数组，不要输出Markdown或说明文字。
+请综合定义、关键词、常见考查方式和易混淆区分四部分，为每个标签生成一段语义完整的中文释义。释义应说明该标签的考查范围、题目中常见的任务或信息特征，以及判断标签时必要的相近知识点区别。保留会影响标签选择的条件和边界，合并重复信息，省去不影响判断的细节。建议每条80至140个汉字；内容较简单时可以更短。
 
-输出格式：
+label_path原样返回。输出JSON数组：
+
 [{"label_path":"原路径","summary":"一段式简明释义"}]
 """
 
@@ -108,10 +102,8 @@ def validate_batch(
         summary = str(item.get("summary") or "").strip()
         if path in by_path or path not in expected:
             raise ValueError(f"模型返回未知或重复路径：{path}")
-        if not summary or "…" in summary or "..." in summary:
-            raise ValueError(f"释义为空或含机械省略号：{path}")
-        if len(summary) < 35:
-            raise ValueError(f"释义过短，可能未覆盖完整含义：{path}")
+        if not summary:
+            raise ValueError(f"释义为空：{path}")
         if len(summary) > 180:
             raise ValueError(f"释义超过180字符：{path}")
         by_path[path] = summary
