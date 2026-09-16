@@ -152,6 +152,10 @@ question-label-match score \
 `scored`，材料不足为 `unjudgeable`。代码会强制检查 `unjudgeable` 必须对应
 `score=null`，避免将缺图题误记为0分。
 
+大题最终分数为“大题整体模型评分”和“同标签各小题评分”的最大值。输出保留
+`group_model_score` 等大题模型原始字段，并记录提供最高支持分的
+`supporting_subquestion_id` 和 `supporting_subquestion_score`，避免大题与小题结论矛盾。
+
 ## 知识点释义分析
 
 第一步仅根据完整知识点路径生成模型释义：

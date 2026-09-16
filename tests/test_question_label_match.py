@@ -65,7 +65,13 @@ def test_score_pairs_and_overwrite_without_network(tmp_path, monkeypatch):
         def create(self, **kwargs):
             data = json.loads(kwargs["messages"][1]["content"])
             payloads.append(data)
-            if (
+            if data["evaluation_scope"] == "complete_question_group":
+                answer = {
+                    "judgement": "scored",
+                    "score": 0.2,
+                    "reason": "整组仅弱相关",
+                }
+            elif (
                 data["evaluation_scope"] == "single_subquestion"
                 and data["current_question"]["stem"] == "小题"
                 and data["knowledge_path"] == "知识点@降水"
@@ -92,6 +98,11 @@ def test_score_pairs_and_overwrite_without_network(tmp_path, monkeypatch):
         ("c", "知识点@降水", None, None),
         ("c", "知识点@土壤", 0.84, True),
     ]
+    assert rows[0]["group_model_score"] == 0.2
+    assert rows[0]["group_model_match"] is False
+    assert rows[0]["supporting_subquestion_id"] == "c"
+    assert rows[0]["supporting_subquestion_score"] == 0.84
+    assert "大题标签集合规则" in rows[0]["reason"]
     root_payload = next(
         payload for payload in payloads
         if payload["evaluation_scope"] == "complete_question_group"

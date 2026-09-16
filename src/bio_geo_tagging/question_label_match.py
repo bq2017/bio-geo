@@ -199,6 +199,47 @@ def request_score(client: OpenAI, model: str, unit: dict, definition: dict) -> d
     }
 
 
+def reconcile_root_scores(output: str) -> None:
+    """Make each root score at least the best scored child for the same label."""
+    best_child: dict[tuple[str, str], dict[str, Any]] = {}
+    for _, record in read_jsonl(output):
+        if (
+            record.get("input_role") != "subquestion"
+            or record.get("status") != "completed"
+            or record.get("judgement") != "scored"
+        ):
+            continue
+        key = (str(record.get("root_question_id", "")), record.get("knw_label", ""))
+        current = best_child.get(key)
+        if current is None or record["score"] > current["score"]:
+            best_child[key] = record
+
+    target = Path(output)
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as stream:
+        for _, record in read_jsonl(output):
+            if record.get("input_role") == "root" and record.get("status") == "completed":
+                record["group_model_judgement"] = record.get("judgement")
+                record["group_model_score"] = record.get("score")
+                record["group_model_match"] = record.get("match")
+                record["group_model_reason"] = record.get("reason")
+                key = (str(record.get("root_question_id", "")), record.get("knw_label", ""))
+                supporting = best_child.get(key)
+                if supporting is not None:
+                    record["supporting_subquestion_id"] = supporting["question_id"]
+                    record["supporting_subquestion_score"] = supporting["score"]
+                    if record.get("score") is None or supporting["score"] > record["score"]:
+                        record["judgement"] = "scored"
+                        record["score"] = supporting["score"]
+                        record["match"] = supporting["score"] >= 0.70
+                        record["reason"] = (
+                            f"小题{supporting['question_id']}对同一标签评分为"
+                            f"{supporting['score']:.2f}；按大题标签集合规则取同标签小题最高分。"
+                        )
+            stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+    temporary.replace(target)
+
+
 def score_units(
     units_file: str,
     definitions_file: str,
@@ -267,6 +308,7 @@ def score_units(
                     summary["attempted"] += 1
                     summary["completed" if result["status"] == "completed" else "errors"] += 1
                     progress.update(1)
+    reconcile_root_scores(output)
     return summary
 
 
