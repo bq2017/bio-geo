@@ -135,7 +135,7 @@ def test_parse_or_recover_result_recovers_labels_from_broken_json():
     }
     broken = (
         '{"candidate_labels":["自然地理@地球仪@经纬网",'
-        '"知识点@人文地理@人口"'
+        '"知识点@人文地理@人口" "unexpected"]}'
     )
 
     result = parse_or_recover_result(broken, allowed)
@@ -146,6 +146,15 @@ def test_parse_or_recover_result_recovers_labels_from_broken_json():
             "知识点@人文地理@人口",
         ]
     }
+
+
+def test_parse_or_recover_result_rejects_truncated_json():
+    allowed = {"知识点@自然地理@地球仪"}
+
+    with pytest.raises(json.JSONDecodeError):
+        parse_or_recover_result(
+            '{"candidate_labels":["知识点@自然地理@地球仪"', allowed
+        )
 
 
 @pytest.mark.parametrize(

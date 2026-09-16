@@ -234,6 +234,9 @@ def parse_or_recover_result(
     try:
         return parse_json_object(content)
     except (json.JSONDecodeError, ValueError):
+        cleaned = content.strip().removesuffix("```").strip()
+        if not cleaned.endswith("}"):
+            raise
         matches: list[tuple[int, str]] = []
         for path in allowed_paths:
             variants = (path, path.removeprefix("知识点@"))
