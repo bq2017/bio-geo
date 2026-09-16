@@ -203,7 +203,7 @@ class DeepSeekCandidateRetriever:
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": build_question_text(unit)},
             ],
-            max_tokens=4096,
+            max_tokens=1024,
             stream=True,
             temperature=0,
         )
