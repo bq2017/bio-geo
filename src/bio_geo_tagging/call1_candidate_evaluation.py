@@ -249,12 +249,153 @@ def evaluate_joined_records(
     }
 
 
+def evaluate_grouped_records(
+    connection: sqlite3.Connection,
+    allowed_paths: set[str],
+    missing_output: Path,
+) -> dict[str, Any]:
+    totals = Counter(
+        {
+            "input_groups": 0,
+            "incomplete_groups": 0,
+            "evaluated_groups": 0,
+            "groups_with_no_knw_labels": 0,
+            "groups_with_unmapped_knw_labels": 0,
+            "groups_with_known_gold": 0,
+            "fully_covered_groups": 0,
+            "known_gold_labels": 0,
+            "recalled_gold_labels": 0,
+        }
+    )
+    missing_counts: Counter[str] = Counter()
+    unmapped_counts: Counter[str] = Counter()
+    type_stats: defaultdict[str, Counter[str]] = defaultdict(Counter)
+    candidate_sizes: list[int] = []
+
+    query = """
+        SELECT u.root_question_id, u.unit_key, u.knw_labels, c.candidate_labels
+        FROM units AS u
+        LEFT JOIN candidates AS c ON c.unit_key = u.unit_key
+        ORDER BY u.root_question_id, u.rowid
+    """
+
+    def evaluate_group(
+        root_id: str | None,
+        rows: list[tuple[str, str, str | None]],
+        output,
+    ) -> None:
+        if not rows:
+            return
+        totals["input_groups"] += 1
+        if any(candidate_json is None for _, _, candidate_json in rows):
+            totals["incomplete_groups"] += 1
+            return
+
+        group_type = "ordinary_question" if len(rows) == 1 else "big_question"
+        gold_labels: list[str] = []
+        candidate_labels: list[str] = []
+        for _, gold_json, candidate_json in rows:
+            gold_labels.extend(json.loads(gold_json))
+            candidate_labels.extend(json.loads(candidate_json))
+        gold_labels = list(dict.fromkeys(gold_labels))
+        candidate_labels = list(dict.fromkeys(candidate_labels))
+        candidate_set = set(candidate_labels)
+        known_gold = [label for label in gold_labels if label in allowed_paths]
+        unmapped = [label for label in gold_labels if label not in allowed_paths]
+        missing = [label for label in known_gold if label not in candidate_set]
+
+        totals["evaluated_groups"] += 1
+        type_stats[group_type]["evaluated_groups"] += 1
+        candidate_sizes.append(len(candidate_labels))
+        if not gold_labels:
+            totals["groups_with_no_knw_labels"] += 1
+        if unmapped:
+            totals["groups_with_unmapped_knw_labels"] += 1
+            unmapped_counts.update(unmapped)
+        if known_gold:
+            totals["groups_with_known_gold"] += 1
+            totals["known_gold_labels"] += len(known_gold)
+            recalled = len(known_gold) - len(missing)
+            totals["recalled_gold_labels"] += recalled
+            stats = type_stats[group_type]
+            stats["groups_with_known_gold"] += 1
+            stats["known_gold_labels"] += len(known_gold)
+            stats["recalled_gold_labels"] += recalled
+            if not missing:
+                totals["fully_covered_groups"] += 1
+                stats["fully_covered_groups"] += 1
+            else:
+                missing_counts.update(missing)
+        if missing or unmapped:
+            output.write(
+                json.dumps(
+                    {
+                        "root_question_id": root_id,
+                        "unit_keys": [row[0] for row in rows],
+                        "group_type": group_type,
+                        "knw_labels": gold_labels,
+                        "candidate_labels": candidate_labels,
+                        "missing_labels": missing,
+                        "unmapped_knw_labels": unmapped,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+    missing_output.parent.mkdir(parents=True, exist_ok=True)
+    with missing_output.open("w", encoding="utf-8", newline="\n") as output:
+        current_root: str | None = None
+        group_rows: list[tuple[str, str, str | None]] = []
+        for root_id, unit_key, gold_json, candidate_json in connection.execute(query):
+            if current_root is not None and root_id != current_root:
+                evaluate_group(current_root, group_rows, output)
+                group_rows = []
+            current_root = root_id
+            group_rows.append((unit_key, gold_json, candidate_json))
+        evaluate_group(current_root, group_rows, output)
+
+    by_group_type: dict[str, dict[str, int | float | None]] = {}
+    for group_type, stats in sorted(type_stats.items()):
+        by_group_type[group_type] = {
+            "evaluated_groups": stats["evaluated_groups"],
+            "groups_with_known_gold": stats["groups_with_known_gold"],
+            "fully_covered_groups": stats["fully_covered_groups"],
+            "known_gold_labels": stats["known_gold_labels"],
+            "recalled_gold_labels": stats["recalled_gold_labels"],
+            "full_coverage_rate": safe_rate(
+                stats["fully_covered_groups"], stats["groups_with_known_gold"]
+            ),
+            "label_recall": safe_rate(
+                stats["recalled_gold_labels"], stats["known_gold_labels"]
+            ),
+        }
+    return {
+        **totals,
+        "full_coverage_rate": safe_rate(
+            totals["fully_covered_groups"], totals["groups_with_known_gold"]
+        ),
+        "label_recall": safe_rate(
+            totals["recalled_gold_labels"], totals["known_gold_labels"]
+        ),
+        "candidate_count": {
+            "average": safe_rate(sum(candidate_sizes), len(candidate_sizes)),
+            "minimum": min(candidate_sizes) if candidate_sizes else None,
+            "maximum": max(candidate_sizes) if candidate_sizes else None,
+        },
+        "missing_label_counts": dict(missing_counts.most_common()),
+        "unmapped_knw_label_counts": dict(unmapped_counts.most_common()),
+        "by_group_type": by_group_type,
+    }
+
+
 def evaluate_files(
     input_path: Path,
     candidates_path: Path,
     catalog_path: Path,
     summary_output: Path,
     missing_output: Path,
+    group_by_root: bool = False,
 ) -> dict[str, Any]:
     _, allowed_paths = load_catalog(catalog_path)
     with tempfile.TemporaryDirectory(prefix="call1-evaluation-") as temp_dir:
@@ -293,9 +434,14 @@ def evaluate_files(
                 raise ValueError(
                     f"候选文件中有{stale_candidates}条记录不属于当前题目文件"
                 )
-            summary = evaluate_joined_records(
-                connection, allowed_paths, missing_output
-            )
+            if group_by_root:
+                summary = evaluate_grouped_records(
+                    connection, allowed_paths, missing_output
+                )
+            else:
+                summary = evaluate_joined_records(
+                    connection, allowed_paths, missing_output
+                )
         finally:
             connection.close()
 
@@ -304,7 +450,8 @@ def evaluate_files(
         "skipped_empty_stem": skipped_empty_stem,
         "completed_candidate_units": completed_candidate_units,
         "units_without_candidate_result": eligible_units
-        - summary["evaluated_units"],
+        - completed_candidate_units,
+        "evaluation_grain": "question_group" if group_by_root else "tagging_unit",
         **summary,
     }
     summary_output.parent.mkdir(parents=True, exist_ok=True)
@@ -324,6 +471,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--catalog", type=Path, required=True)
     parser.add_argument("--summary-output", type=Path, required=True)
     parser.add_argument("--missing-output", type=Path, required=True)
+    parser.add_argument("--group-by-root", action="store_true")
     return parser
 
 
@@ -335,6 +483,7 @@ def main() -> None:
         args.catalog,
         args.summary_output,
         args.missing_output,
+        args.group_by_root,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 

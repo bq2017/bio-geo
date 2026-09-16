@@ -109,12 +109,14 @@ question-label-candidates-evaluate \
   --candidates runs/tagging/geography-call1-candidates.jsonl \
   --catalog data/processed/geography-labels-call1-catalog.txt \
   --summary-output runs/tagging/geography-call1-evaluation-summary.json \
-  --missing-output runs/tagging/geography-call1-missed-labels.jsonl
+  --missing-output runs/tagging/geography-call1-missed-labels.jsonl \
+  --group-by-root
 ```
 
-汇总文件记录全量覆盖率和逐标签召回率；明细文件记录漏召回标签以及无法与
-当前414个标签对应的 `knw_labels`。候选尚未全部生成时也可以运行，未完成题目
-会计入 `units_without_candidate_result`，但不会进入召回率分母。
+`--group-by-root` 会先合并根题目和全部小题的候选，再与整道题重复保存的
+`knw_labels` 比较。汇总文件记录全量覆盖率和逐标签召回率；明细文件记录漏召回
+标签以及无法与当前414个标签对应的 `knw_labels`。候选尚未全部生成时也可以
+运行，未完整完成的题组不会进入召回率分母。
 
 ## 原标签与原释义匹配评分
 

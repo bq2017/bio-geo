@@ -117,3 +117,76 @@ def test_evaluate_files_uses_known_knw_labels_and_reports_unmapped(tmp_path):
     ]
     assert details[0]["missing_labels"] == ["知识点@标签1"]
     assert details[1]["unmapped_knw_labels"] == ["知识点@旧标签"]
+
+
+def test_evaluate_files_groups_complete_question_by_root(tmp_path):
+    catalog = tmp_path / "catalog.txt"
+    catalog.write_text(
+        "\n".join(f"知识点@标签{index}｜释义{index}" for index in range(414))
+        + "\n",
+        encoding="utf-8",
+    )
+    units = [
+        {
+            "question_id": "root",
+            "root_question_id": "root",
+            "input_role": "root",
+            "stem": "公共题干",
+            "knw_labels": ["知识点@标签1"],
+        },
+        {
+            "question_id": "child",
+            "root_question_id": "root",
+            "input_role": "subquestion",
+            "stem": "小题",
+            "knw_labels": ["知识点@标签1"],
+        },
+        {
+            "question_id": "pending",
+            "root_question_id": "pending",
+            "input_role": "root",
+            "stem": "未完成普通题",
+            "knw_labels": ["知识点@标签2"],
+        },
+    ]
+    candidates = [
+        {
+            "unit_key": "root|root|root",
+            "candidate_labels": ["知识点@标签0"],
+            "uncovered_topic": None,
+            "status": "completed",
+        },
+        {
+            "unit_key": "root|child|subquestion",
+            "candidate_labels": ["知识点@标签1"],
+            "uncovered_topic": None,
+            "status": "completed",
+        },
+    ]
+    input_path = tmp_path / "units.jsonl"
+    candidates_path = tmp_path / "candidates.jsonl"
+    summary_path = tmp_path / "summary.json"
+    missing_path = tmp_path / "missing.jsonl"
+    write_jsonl(input_path, units)
+    write_jsonl(candidates_path, candidates)
+
+    summary = evaluate_files(
+        input_path,
+        candidates_path,
+        catalog,
+        summary_path,
+        missing_path,
+        group_by_root=True,
+    )
+
+    assert summary["evaluation_grain"] == "question_group"
+    assert summary["input_groups"] == 2
+    assert summary["evaluated_groups"] == 1
+    assert summary["incomplete_groups"] == 1
+    assert summary["groups_with_known_gold"] == 1
+    assert summary["fully_covered_groups"] == 1
+    assert summary["full_coverage_rate"] == 1.0
+    assert summary["label_recall"] == 1.0
+    assert summary["units_without_candidate_result"] == 1
+    assert summary["by_group_type"]["big_question"]["fully_covered_groups"] == 1
+    assert missing_path.read_text(encoding="utf-8") == ""
