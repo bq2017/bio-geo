@@ -64,6 +64,22 @@ question-tagging-units `
 根题目和每个小题分别形成一条记录。小题记录通过 `context_stem`
 携带大题公共题干，并保留该小题自己的 `knw_labels`。
 
+按完整题组随机抽取1000道原始题用于候选召回检测：
+
+```bash
+question-tagging-sample \
+  --input data/annotation/geography-tagging-units.jsonl \
+  --catalog data/processed/geography-labels-call1-catalog.txt \
+  --output data/annotation/geography-tagging-sample-1000.jsonl \
+  --summary-output runs/tagging/geography-tagging-sample-1000-summary.json \
+  --groups 1000 \
+  --seed 20260916
+```
+
+抽样单位是 `root_question_id`。普通题保留一条记录；大题同时保留根题目和全部
+小题。题干为空、没有原标签、原标签不属于当前414标签或缺少根题目的题组不
+进入样本。
+
 ## 调用一：候选标签召回
 
 调用一读取独立打标单元和414条简明标签目录。为避免超过模型上下文限制，

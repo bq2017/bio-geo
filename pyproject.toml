@@ -20,6 +20,7 @@ label-definition-compare = "bio_geo_tagging.label_definition_validation:compare_
 label-definition-review = "bio_geo_tagging.label_definition_validation:review_main"
 question-info-merge = "bio_geo_tagging.question_info_merge:main"
 question-tagging-units = "bio_geo_tagging.question_tagging_units:main"
+question-tagging-sample = "bio_geo_tagging.sample_tagging_groups:main"
 question-label-candidates = "bio_geo_tagging.call1_candidate_retrieval:main"
 question-label-candidates-evaluate = "bio_geo_tagging.call1_candidate_evaluation:main"
 question-label-match = "bio_geo_tagging.question_label_match:main"
