@@ -85,6 +85,21 @@ question-label-candidates \
 模型根据原题从合并候选中收敛一次，不直接截断。运行中断后重复执行同一命令
 即可跳过已完成的打标单元。
 
+使用题目中已有的 `knw_labels` 检查候选召回：
+
+```bash
+question-label-candidates-evaluate \
+  --input data/annotation/geography-tagging-units.jsonl \
+  --candidates runs/tagging/geography-call1-candidates.jsonl \
+  --catalog data/processed/geography-labels-call1-catalog.txt \
+  --summary-output runs/tagging/geography-call1-evaluation-summary.json \
+  --missing-output runs/tagging/geography-call1-missed-labels.jsonl
+```
+
+汇总文件记录全量覆盖率和逐标签召回率；明细文件记录漏召回标签以及无法与
+当前414个标签对应的 `knw_labels`。候选尚未全部生成时也可以运行，未完成题目
+会计入 `units_without_candidate_result`，但不会进入召回率分母。
+
 ## 原标签与原释义匹配评分
 
 先从释义对比结果中提取**现有释义**（不使用 DS 生成释义）：
