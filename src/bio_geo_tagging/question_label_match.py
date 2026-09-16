@@ -13,10 +13,9 @@ from tqdm import tqdm
 
 FIELDS = ("definition", "keywords", "exam_methods", "distinction")
 SYSTEM_PROMPT = """你是高中地理题目与原有知识点释义的匹配度评估员。
-只评估当前题目是否实际考查给定知识点，不重新打标，也不判断其他知识点。
+当前输入是一道完整大题，包含公共题干和全部小题。只评估整道大题是否实际考查给定的原标签，不重新打标，也不判断其他知识点。
 依据知识点完整路径和原有释义判断解题所需知识。
-evaluation_scope=complete_question_group时，原标签属于整道大题，应结合公共题干和全部小题判断；只要至少一个小题明确考查该知识点，整道大题就可以匹配，不要求每个小题都考查它。
-evaluation_scope=single_subquestion时，只判断当前小题；共同题干仅供理解，不把背景词或其他小题当作当前小题考点。
+只要公共题干或至少一个小题明确考查该知识点，整道大题就可以匹配，不要求每个小题都考查它；不要把仅作为材料背景出现的词语当作考点。
 常见考查方式是示例，不是穷举；不要仅因未出现相同字词或例题而扣分。解析可以辅助判断，但不能只凭解析中的提及判定考点。
 0.90-1.00：直接核心依据；0.80-0.89：明确考查；0.70-0.79：可归入但偏边界/辅助；
 0.40-0.69：有关联但不足以作为该题知识点；0.10-0.39：背景或弱关联；
@@ -99,11 +98,10 @@ def load_definitions(path: str) -> dict[str, dict[str, Any]]:
     return definitions
 
 
-def build_scoring_units(path: str):
-    """Expand merged records into one complete root and independent sub-questions."""
+def read_complete_questions(path: str):
+    """Read each merged record as one complete question scoring unit."""
     for number, question in read_jsonl(path):
-        root_id = str(question.get("question_id", ""))
-        if not root_id:
+        if not str(question.get("question_id", "")):
             raise ValueError(f"聚合题目文件第 {number} 行缺少question_id")
         sub_question_records = question.get("sub_questions", [])
         if not isinstance(sub_question_records, list):
@@ -120,48 +118,22 @@ def build_scoring_units(path: str):
         ]
         if len(sub_questions) != len(sub_question_records):
             raise ValueError(f"聚合题目文件第 {number} 行包含无效小题记录")
-        root = {
-            key: value
-            for key, value in question.items()
-            if key != "sub_questions"
-        }
-        root["input_role"] = "root"
-        root["root_question_id"] = root_id
-        root["scoring_sub_questions"] = sub_questions
-        yield root
-        for sub_question in sub_question_records:
-            unit = dict(sub_question)
-            unit["input_role"] = "subquestion"
-            unit["root_question_id"] = root_id
-            unit["context_stem"] = question.get("stem", "")
-            yield unit
+        unit = dict(question)
+        unit["scoring_sub_questions"] = sub_questions
+        yield unit
 
 
 def request_score(client: OpenAI, model: str, unit: dict, definition: dict) -> dict:
-    if unit.get("input_role") == "root":
-        payload = {
-            "knowledge_path": definition["knw_label"],
-            "existing_interpretation": definition["existing_interpretation"],
-            "evaluation_scope": "complete_question_group",
-            "common_question": {
-                "stem": unit.get("stem", ""),
-                "options": unit.get("options", ""),
-                "analysis": unit.get("analysis", ""),
-            },
+    payload = {
+        "knowledge_path": definition["knw_label"],
+        "existing_interpretation": definition["existing_interpretation"],
+        "complete_question": {
+            "stem": unit.get("stem", ""),
+            "options": unit.get("options", ""),
+            "analysis": unit.get("analysis", ""),
             "sub_questions": unit.get("scoring_sub_questions", []),
-        }
-    else:
-        payload = {
-            "knowledge_path": definition["knw_label"],
-            "existing_interpretation": definition["existing_interpretation"],
-            "evaluation_scope": "single_subquestion",
-            "context_stem": unit.get("context_stem", ""),
-            "current_question": {
-                "stem": unit.get("stem", ""),
-                "options": unit.get("options", ""),
-                "analysis": unit.get("analysis", ""),
-            },
-        }
+        },
+    }
     chunks = client.chat.completions.create(
         model=model,
         messages=[
@@ -199,47 +171,6 @@ def request_score(client: OpenAI, model: str, unit: dict, definition: dict) -> d
     }
 
 
-def reconcile_root_scores(output: str) -> None:
-    """Make each root score at least the best scored child for the same label."""
-    best_child: dict[tuple[str, str], dict[str, Any]] = {}
-    for _, record in read_jsonl(output):
-        if (
-            record.get("input_role") != "subquestion"
-            or record.get("status") != "completed"
-            or record.get("judgement") != "scored"
-        ):
-            continue
-        key = (str(record.get("root_question_id", "")), record.get("knw_label", ""))
-        current = best_child.get(key)
-        if current is None or record["score"] > current["score"]:
-            best_child[key] = record
-
-    target = Path(output)
-    temporary = target.with_suffix(target.suffix + ".tmp")
-    with temporary.open("w", encoding="utf-8") as stream:
-        for _, record in read_jsonl(output):
-            if record.get("input_role") == "root" and record.get("status") == "completed":
-                record["group_model_judgement"] = record.get("judgement")
-                record["group_model_score"] = record.get("score")
-                record["group_model_match"] = record.get("match")
-                record["group_model_reason"] = record.get("reason")
-                key = (str(record.get("root_question_id", "")), record.get("knw_label", ""))
-                supporting = best_child.get(key)
-                if supporting is not None:
-                    record["supporting_subquestion_id"] = supporting["question_id"]
-                    record["supporting_subquestion_score"] = supporting["score"]
-                    if record.get("score") is None or supporting["score"] > record["score"]:
-                        record["judgement"] = "scored"
-                        record["score"] = supporting["score"]
-                        record["match"] = supporting["score"] >= 0.70
-                        record["reason"] = (
-                            f"小题{supporting['question_id']}对同一标签评分为"
-                            f"{supporting['score']:.2f}；按大题标签集合规则取同标签小题最高分。"
-                        )
-            stream.write(json.dumps(record, ensure_ascii=False) + "\n")
-    temporary.replace(target)
-
-
 def score_units(
     units_file: str,
     definitions_file: str,
@@ -259,7 +190,7 @@ def score_units(
     summary = {"attempted": 0, "completed": 0, "errors": 0}
 
     def pending_pairs():
-        for unit in build_scoring_units(units_file):
+        for unit in read_complete_questions(units_file):
             for label in dict.fromkeys(unit.get("knw_labels", [])):
                 yield unit, label
 
@@ -267,8 +198,6 @@ def score_units(
         unit, label = pair
         result = {
             "question_id": str(unit["question_id"]),
-            "root_question_id": str(unit.get("root_question_id", unit.get("parent_id", ""))),
-            "input_role": unit.get("input_role"),
             "knw_label": label,
             "label_id": definitions.get(label, {}).get("label_id"),
             "model": model,
@@ -281,11 +210,8 @@ def score_units(
         except Exception as error:
             result.update(status="error", error_type=type(error).__name__, error=str(error))
             error_logger.error(
-                "question_id=%s root_question_id=%s input_role=%s "
-                "knw_label=%s error_type=%s error=%s",
+                "question_id=%s knw_label=%s error_type=%s error=%s",
                 result["question_id"],
-                result["root_question_id"],
-                result["input_role"],
                 label,
                 type(error).__name__,
                 error,
@@ -308,7 +234,6 @@ def score_units(
                     summary["attempted"] += 1
                     summary["completed" if result["status"] == "completed" else "errors"] += 1
                     progress.update(1)
-    reconcile_root_scores(output)
     return summary
 
 

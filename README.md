@@ -142,19 +142,15 @@ question-label-match score \
   --limit 10
 ```
 
-聚合文件中根题目和每个小题的每个原标签分别评估。输出 `score`、`reason`，并由代码按
+每条聚合记录作为一道完整大题，只评估大题自身 `knw_labels` 中的原标签。模型输入包含
+公共题干和全部小题，不单独生成小题评分。输出 `score`、`reason`，并由代码按
 `score >= 0.70` 计算 `match`。缺图无法判断时 `score` 和 `match` 均为
 `null`。每次运行都会覆盖评分结果文件和错误日志，保证当前实验不混入历史记录。
 本步骤不统计分数分布或 ABCD 分类。
 
-根题目的原标签按整道大题评估，输入包含公共题干和全部小题；小题的原标签
-只按“公共题干 + 当前小题”评估。模型必须同时返回 `judgement`：正常评分为
+模型必须同时返回 `judgement`：正常评分为
 `scored`，材料不足为 `unjudgeable`。代码会强制检查 `unjudgeable` 必须对应
 `score=null`，避免将缺图题误记为0分。
-
-大题最终分数为“大题整体模型评分”和“同标签各小题评分”的最大值。输出保留
-`group_model_score` 等大题模型原始字段，并记录提供最高支持分的
-`supporting_subquestion_id` 和 `supporting_subquestion_score`，避免大题与小题结论矛盾。
 
 ## 知识点释义分析
 

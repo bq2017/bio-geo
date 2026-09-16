@@ -65,50 +65,26 @@ def test_score_pairs_and_overwrite_without_network(tmp_path, monkeypatch):
         def create(self, **kwargs):
             data = json.loads(kwargs["messages"][1]["content"])
             payloads.append(data)
-            if data["evaluation_scope"] == "complete_question_group":
-                answer = {
-                    "judgement": "scored",
-                    "score": 0.2,
-                    "reason": "整组仅弱相关",
-                }
-            elif (
-                data["evaluation_scope"] == "single_subquestion"
-                and data["current_question"]["stem"] == "小题"
-                and data["knowledge_path"] == "知识点@降水"
-            ):
-                answer = {
-                    "judgement": "unjudgeable",
-                    "score": None,
-                    "reason": "缺少图示",
-                }
-            else:
-                answer = {
-                    "judgement": "scored",
-                    "score": 0.84,
-                    "reason": "直接考查",
-                }
+            answer = {
+                "judgement": "scored",
+                "score": 0.84,
+                "reason": "直接考查",
+            }
             return [SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=json.dumps(answer, ensure_ascii=False)))])]
 
     monkeypatch.setattr(matching, "OpenAI", FakeClient)
     arguments = (str(units), str(definitions), str(output), "http://example/v1", "DeepSeek-V4-Flash")
-    assert matching.score_units(*arguments, workers=2)["completed"] == 3
+    assert matching.score_units(*arguments, workers=2)["completed"] == 1
     rows = [row for _, row in matching.read_jsonl(str(output))]
     assert [(r["question_id"], r["knw_label"], r["score"], r["match"]) for r in rows] == [
         ("p", "知识点@土壤", 0.84, True),
-        ("c", "知识点@降水", None, None),
-        ("c", "知识点@土壤", 0.84, True),
     ]
-    assert rows[0]["group_model_score"] == 0.2
-    assert rows[0]["group_model_match"] is False
-    assert rows[0]["supporting_subquestion_id"] == "c"
-    assert rows[0]["supporting_subquestion_score"] == 0.84
-    assert "大题标签集合规则" in rows[0]["reason"]
-    root_payload = next(
-        payload for payload in payloads
-        if payload["evaluation_scope"] == "complete_question_group"
-    )
-    assert root_payload["common_question"]["stem"] == "公共题干"
-    assert root_payload["sub_questions"] == [
+    assert "input_role" not in rows[0]
+    assert "group_model_score" not in rows[0]
+    assert len(payloads) == 1
+    assert payloads[0]["knowledge_path"] == "知识点@土壤"
+    assert payloads[0]["complete_question"]["stem"] == "公共题干"
+    assert payloads[0]["complete_question"]["sub_questions"] == [
         {
             "question_id": "c",
             "stem": "小题",
@@ -116,15 +92,9 @@ def test_score_pairs_and_overwrite_without_network(tmp_path, monkeypatch):
             "analysis": "",
         }
     ]
-    sub_payloads = [
-        payload for payload in payloads
-        if payload["evaluation_scope"] == "single_subquestion"
-    ]
-    assert all(payload["context_stem"] == "公共题干" for payload in sub_payloads)
-    assert all(payload["current_question"]["stem"] == "小题" for payload in sub_payloads)
     output.write_text("stale output\n", encoding="utf-8")
-    assert matching.score_units(*arguments)["completed"] == 3
-    assert len(list(matching.read_jsonl(str(output)))) == 3
+    assert matching.score_units(*arguments)["completed"] == 1
+    assert len(list(matching.read_jsonl(str(output)))) == 1
 
 
 def test_score_writes_error_details_to_log(tmp_path, monkeypatch):
@@ -196,7 +166,6 @@ def test_request_score_rejects_unjudgeable_with_numeric_score():
             ]
 
     unit = {
-        "input_role": "root",
         "stem": "读图回答",
         "scoring_sub_questions": [],
     }
