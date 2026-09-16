@@ -83,6 +83,34 @@ question-label-candidates \
 完整路径，最多20个且不要求凑满。运行中断后重复执行同一命令即可跳过已完成
 的打标单元。
 
+## 原标签与原释义匹配评分
+
+先从释义对比结果中提取**现有释义**（不使用 DS 生成释义）：
+
+```bash
+question-label-match export-definitions \
+  --comparison-jsonl runs/validation/label-definition-comparison.jsonl \
+  --output-jsonl data/taxonomy/geography-existing-definitions.jsonl
+```
+
+先测试少量题目—标签对，再去掉 `--limit` 跑全量：
+
+```bash
+question-label-match score \
+  --input-jsonl data/annotation/geography-tagging-units.jsonl \
+  --definitions-jsonl data/taxonomy/geography-existing-definitions.jsonl \
+  --output-jsonl runs/validation/geography-label-match.jsonl \
+  --base-url http://172.22.0.35:9102/v1 \
+  --model DeepSeek-V4-Flash \
+  --workers 1 \
+  --limit 10
+```
+
+每个打标单元的每个原标签单独评估。输出 `score`、`reason`，并由代码按
+`score >= 0.70` 计算 `match`。缺图无法判断时 `score` 和 `match` 均为
+`null`。已成功处理的题目—标签对在重跑时跳过；错误记录在重跑时再次尝试。
+只输出评分结果，不在本步骤统计分数分布或 ABCD 分类。
+
 ## 知识点释义分析
 
 第一步仅根据完整知识点路径生成模型释义：
