@@ -5,6 +5,7 @@ import pytest
 from bio_geo_tagging.call1_candidate_retrieval import (
     build_question_text,
     load_catalog,
+    load_units,
     validate_result,
 )
 
@@ -47,6 +48,34 @@ def test_build_question_text_separates_context_and_excludes_existing_labels():
     assert "【解析】\n解析内容" in rendered
     assert "【图片描述】\n等高线图" in rendered
     assert "不应泄漏" not in rendered
+
+
+def test_load_units_skips_empty_root_but_keeps_its_subquestion(tmp_path):
+    input_path = tmp_path / "units.jsonl"
+    units = [
+        {
+            "question_id": "root-1",
+            "root_question_id": "root-1",
+            "input_role": "root",
+            "stem": "",
+        },
+        {
+            "question_id": "child-1",
+            "root_question_id": "root-1",
+            "input_role": "subquestion",
+            "context_stem": "",
+            "stem": "当前小题",
+        },
+    ]
+    input_path.write_text(
+        "".join(json.dumps(unit, ensure_ascii=False) + "\n" for unit in units),
+        encoding="utf-8",
+    )
+
+    valid_units, skipped_empty_stem = load_units(input_path)
+
+    assert valid_units == [units[1]]
+    assert skipped_empty_stem == 1
 
 
 def test_validate_result_accepts_known_unique_labels():

@@ -91,9 +91,10 @@ def make_unit_key(unit: dict[str, Any]) -> str:
     return f"{root_question_id}|{question_id}|{input_role}"
 
 
-def load_units(input_path: Path) -> list[dict[str, Any]]:
+def load_units(input_path: Path) -> tuple[list[dict[str, Any]], int]:
     units: list[dict[str, Any]] = []
     seen_keys: set[str] = set()
+    skipped_empty_stem = 0
     with input_path.open("r", encoding="utf-8") as stream:
         for line_number, line in enumerate(stream, start=1):
             if not line.strip():
@@ -107,11 +108,13 @@ def load_units(input_path: Path) -> list[dict[str, Any]]:
             unit_key = make_unit_key(unit)
             if unit_key in seen_keys:
                 raise ValueError(f"题目文件存在重复打标单元：{unit_key}")
-            if not as_text(unit.get("stem")):
-                raise ValueError(f"题目{unit_key}的stem为空")
             seen_keys.add(unit_key)
+            if not as_text(unit.get("stem")):
+                skipped_empty_stem += 1
+                logging.warning("跳过题干为空的打标单元：%s", unit_key)
+                continue
             units.append(unit)
-    return units
+    return units, skipped_empty_stem
 
 
 def build_question_text(unit: dict[str, Any]) -> str:
@@ -374,7 +377,7 @@ def main() -> None:
         force=True,
     )
     catalog, allowed_paths = load_catalog(args.catalog)
-    units = load_units(args.input)
+    units, skipped_empty_stem = load_units(args.input)
     summary = run_retrieval(
         units,
         catalog,
@@ -388,6 +391,7 @@ def main() -> None:
         args.timeout,
         args.limit,
     )
+    summary["skipped_empty_stem"] = skipped_empty_stem
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     if summary["errors"]:
         raise SystemExit("存在失败题目，请重复执行同一命令继续补跑")
