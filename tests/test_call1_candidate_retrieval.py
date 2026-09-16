@@ -1,0 +1,82 @@
+import json
+
+import pytest
+
+from bio_geo_tagging.call1_candidate_retrieval import (
+    build_question_text,
+    load_catalog,
+    validate_result,
+)
+
+
+def test_load_catalog_returns_exact_paths(tmp_path):
+    catalog = tmp_path / "catalog.txt"
+    catalog.write_text(
+        "知识点@自然地理@标签一｜释义一\n知识点@人文地理@标签二｜释义二\n",
+        encoding="utf-8",
+    )
+
+    text, paths = load_catalog(catalog, expected_count=2)
+
+    assert text.splitlines() == [
+        "知识点@自然地理@标签一｜释义一",
+        "知识点@人文地理@标签二｜释义二",
+    ]
+    assert paths == {"知识点@自然地理@标签一", "知识点@人文地理@标签二"}
+
+
+def test_build_question_text_separates_context_and_excludes_existing_labels():
+    unit = {
+        "question_id": "child-1",
+        "input_role": "subquestion",
+        "context_stem": "公共材料",
+        "stem": "当前小题",
+        "options": [{"key": "A", "text": "选项A"}],
+        "answer": "A",
+        "analysis": "解析内容",
+        "image_description": "等高线图",
+        "knw_labels": ["知识点@不应泄漏"],
+    }
+
+    rendered = build_question_text(unit)
+
+    assert "【公共题干，仅作为上下文】\n公共材料" in rendered
+    assert "【当前打标对象】\n当前小题" in rendered
+    assert json.dumps(unit["options"], ensure_ascii=False) in rendered
+    assert "【答案】\nA" in rendered
+    assert "【解析】\n解析内容" in rendered
+    assert "【图片描述】\n等高线图" in rendered
+    assert "不应泄漏" not in rendered
+
+
+def test_validate_result_accepts_known_unique_labels():
+    allowed = {"知识点@标签一", "知识点@标签二"}
+
+    labels, uncovered = validate_result(
+        {
+            "candidate_labels": ["知识点@标签一", "知识点@标签二"],
+            "uncovered_topic": None,
+        },
+        allowed,
+    )
+
+    assert labels == ["知识点@标签一", "知识点@标签二"]
+    assert uncovered is None
+
+
+@pytest.mark.parametrize(
+    "candidate_labels",
+    [
+        ["知识点@不存在"],
+        ["知识点@标签一", "知识点@标签一"],
+        [f"知识点@标签{i}" for i in range(21)],
+    ],
+)
+def test_validate_result_rejects_invalid_candidates(candidate_labels):
+    allowed = {"知识点@标签一"} | {f"知识点@标签{i}" for i in range(21)}
+
+    with pytest.raises(ValueError):
+        validate_result(
+            {"candidate_labels": candidate_labels, "uncovered_topic": None},
+            allowed,
+        )

@@ -64,6 +64,25 @@ question-tagging-units `
 根题目和每个小题分别形成一条记录。小题记录通过 `context_stem`
 携带大题公共题干，并保留该小题自己的 `knw_labels`。
 
+## 调用一：候选标签召回
+
+调用一读取独立打标单元和414条简明标签目录，为每个单元召回候选标签：
+
+```bash
+question-label-candidates \
+  --input data/annotation/geography-tagging-units.jsonl \
+  --catalog data/processed/geography-labels-call1-catalog.txt \
+  --output runs/tagging/geography-call1-candidates.jsonl \
+  --log-file runs/logs/geography-call1-candidates.log \
+  --base-url http://172.22.0.35:9204/v1 \
+  --model DeepSeek-V4-Flash \
+  --concurrency 10
+```
+
+脚本不会把输入数据中已有的 `knw_labels` 发送给模型。候选标签必须是目录中的
+完整路径，最多20个且不要求凑满。运行中断后重复执行同一命令即可跳过已完成
+的打标单元。
+
 ## 知识点释义分析
 
 第一步仅根据完整知识点路径生成模型释义：
