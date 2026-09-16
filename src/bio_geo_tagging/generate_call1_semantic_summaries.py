@@ -8,6 +8,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
@@ -134,6 +135,7 @@ def main() -> None:
     parser.add_argument("--model", default="DeepSeek-V4-Flash")
     parser.add_argument("--api-key-env", default="DS_API_KEY")
     parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--concurrency", type=int, default=10)
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--retries", type=int, default=3)
     args = parser.parse_args()
@@ -144,28 +146,36 @@ def main() -> None:
     args.output_jsonl.parent.mkdir(parents=True, exist_ok=True)
     api_key = os.environ.get(args.api_key_env, "")
 
-    for start in range(0, len(pending), args.batch_size):
-        batch = pending[start : start + args.batch_size]
+    batches = [
+        pending[start : start + args.batch_size]
+        for start in range(0, len(pending), args.batch_size)
+    ]
+
+    def generate_batch(batch: list[dict[str, object]]) -> list[dict[str, str]]:
         last_error: Exception | None = None
         for attempt in range(1, args.retries + 1):
             try:
                 generated = call_model(
                     args.endpoint, args.model, api_key, batch, args.timeout
                 )
-                validated = validate_batch(batch, generated)
-                with args.output_jsonl.open("a", encoding="utf-8", newline="\n") as handle:
-                    for item in validated:
-                        handle.write(json.dumps(item, ensure_ascii=False) + "\n")
-                        completed[item["label_path"]] = item
-                print(f"completed={len(completed)}/{len(source_records)}")
-                last_error = None
-                break
+                return validate_batch(batch, generated)
             except (ValueError, KeyError, json.JSONDecodeError, urllib.error.URLError) as error:
                 last_error = error
-                print(f"attempt={attempt} failed={error}")
+                print(f"batch={batch[0]['label_path']} attempt={attempt} failed={error}")
                 time.sleep(min(attempt * 2, 6))
-        if last_error is not None:
-            raise RuntimeError(f"批次生成失败：{batch[0]['label_path']}") from last_error
+        raise RuntimeError(f"批次生成失败：{batch[0]['label_path']}") from last_error
+
+    with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
+        future_to_batch = {
+            executor.submit(generate_batch, batch): batch for batch in batches
+        }
+        for future in as_completed(future_to_batch):
+            validated = future.result()
+            with args.output_jsonl.open("a", encoding="utf-8", newline="\n") as handle:
+                for item in validated:
+                    handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+                    completed[item["label_path"]] = item
+            print(f"completed={len(completed)}/{len(source_records)}")
 
     ordered = [completed[str(item["label_path"])] for item in source_records]
     if len(ordered) != 414:
