@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from threading import Lock
@@ -34,6 +35,17 @@ SYSTEM_PROMPT = """你是高中地理知识点候选标签召回器。
 {"candidate_labels":["完整标签路径"]}
 
 【标签目录】
+{catalog}
+"""
+
+CONSOLIDATION_PROMPT = """你是高中地理知识点候选标签召回器。
+
+三批标签召回结果已经合并，但候选数量超过20个。请重新根据题目判断，只保留完成当前设问可能实际使用的知识点。公共题干只用于理解当前设问；错误选项、背景知识、延伸知识以及仅因主题相近而出现的标签不能保留。
+
+只能从下面的候选中选择，最多20个，不要求凑满。输出一个JSON对象：
+{"candidate_labels":["完整标签路径"]}
+
+【待收敛候选】
 {catalog}
 """
 
@@ -216,6 +228,30 @@ def parse_json_object(content: str) -> dict[str, Any]:
     return result
 
 
+def parse_or_recover_result(
+    content: str, allowed_paths: set[str]
+) -> dict[str, Any]:
+    try:
+        return parse_json_object(content)
+    except (json.JSONDecodeError, ValueError):
+        matches: list[tuple[int, str]] = []
+        for path in allowed_paths:
+            variants = (path, path.removeprefix("知识点@"))
+            positions = []
+            for variant in variants:
+                for match in re.finditer(re.escape(variant), content):
+                    end = match.end()
+                    if end == len(content) or content[end] in '\"｜,]}\n\r':
+                        positions.append(match.start())
+            if positions:
+                matches.append((min(positions), path))
+        if not matches:
+            raise
+        matches.sort()
+        logging.warning("DS输出JSON无效，已从返回文本恢复%s个标签", len(matches))
+        return {"candidate_labels": [path for _, path in matches]}
+
+
 class DeepSeekCandidateRetriever:
     def __init__(
         self,
@@ -235,7 +271,43 @@ class DeepSeekCandidateRetriever:
             (SYSTEM_PROMPT.replace("{catalog}", catalog), allowed_paths)
             for catalog, allowed_paths in catalog_parts
         ]
+        self.catalog_lines = {
+            line.split("｜", 1)[0].strip(): line
+            for catalog, _ in catalog_parts
+            for line in catalog.splitlines()
+        }
         self.model = model
+
+    def request(self, system_prompt: str, question_text: str) -> str:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": question_text},
+            ],
+            max_tokens=2048,
+            stream=True,
+            temperature=0,
+        )
+        return "".join(
+            chunk.choices[0].delta.content or ""
+            for chunk in response
+            if chunk.choices
+        )
+
+    def consolidate(self, question_text: str, candidates: list[str]) -> list[str]:
+        candidate_catalog = "\n".join(
+            self.catalog_lines[label] for label in candidates
+        )
+        system_prompt = CONSOLIDATION_PROMPT.replace("{catalog}", candidate_catalog)
+        content = self.request(system_prompt, question_text)
+        if not content.strip():
+            raise ValueError("候选收敛时DS返回空内容")
+        result = parse_or_recover_result(content, set(candidates))
+        labels = normalize_shard_result(result, set(candidates))
+        if len(labels) > 20:
+            raise ValueError(f"候选收敛后仍超过20个：{len(labels)}")
+        return labels
 
     def retrieve(self, unit: dict[str, Any]) -> tuple[list[str], str | None]:
         question_text = build_question_text(unit)
@@ -243,27 +315,14 @@ class DeepSeekCandidateRetriever:
         for part_number, (system_prompt, allowed_paths) in enumerate(
             self.catalog_parts, start=1
         ):
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": question_text},
-                ],
-                max_tokens=1024,
-                stream=True,
-                temperature=0,
-            )
-            content = "".join(
-                chunk.choices[0].delta.content or ""
-                for chunk in response
-                if chunk.choices
-            )
+            content = self.request(system_prompt, question_text)
             if not content.strip():
                 raise ValueError(f"第{part_number}批DS返回空内容")
-            labels = normalize_shard_result(parse_json_object(content), allowed_paths)
-            candidates.extend(labels)
+            result = parse_or_recover_result(content, allowed_paths)
+            candidates.extend(normalize_shard_result(result, allowed_paths))
         if len(candidates) > 20:
-            raise ValueError(f"三批候选合并后超过20个：{len(candidates)}，未截断")
+            logging.info("三批合并得到%s个候选，执行候选收敛", len(candidates))
+            candidates = self.consolidate(question_text, candidates)
         return candidates, None
 
 

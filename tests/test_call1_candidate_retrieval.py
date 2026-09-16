@@ -7,6 +7,7 @@ from bio_geo_tagging.call1_candidate_retrieval import (
     load_catalog,
     load_units,
     normalize_shard_result,
+    parse_or_recover_result,
     split_catalog,
     validate_result,
 )
@@ -124,6 +125,27 @@ def test_normalize_shard_result_repairs_format_and_deduplicates():
     )
 
     assert labels == ["知识点@自然地理@地球仪", "知识点@自然地理@经纬网"]
+
+
+def test_parse_or_recover_result_recovers_labels_from_broken_json():
+    allowed = {
+        "知识点@自然地理@地球仪",
+        "知识点@自然地理@地球仪@经纬网",
+        "知识点@人文地理@人口",
+    }
+    broken = (
+        '{"candidate_labels":["自然地理@地球仪@经纬网",'
+        '"知识点@人文地理@人口"'
+    )
+
+    result = parse_or_recover_result(broken, allowed)
+
+    assert result == {
+        "candidate_labels": [
+            "知识点@自然地理@地球仪@经纬网",
+            "知识点@人文地理@人口",
+        ]
+    }
 
 
 @pytest.mark.parametrize(
