@@ -211,6 +211,10 @@ PYTHONPATH=src python -m bio_geo_tagging.label_definition_diagnosis \
 不是整道大题的主要主题而排除。即使知识点整体被判为 `insufficient_evidence`，所有
 抽样题目也必须完成结构化分类，不允许遗漏。
 
+全量完成后如存在 `error`，可在原命令末尾增加 `--retry-errors`。该模式保留所有
+`completed` 结果，只重新处理错误或缺失标签，并用重试结果替换原错误行；输出文件
+仍然每个标签一行，不会追加重复记录。
+
 ## 知识点释义分析
 
 第一步仅根据完整知识点路径生成模型释义：

@@ -275,14 +275,34 @@ def diagnose(
     limit: int | None = None,
     timeout: float = 300.0,
     max_tokens: int = 768,
+    retry_errors: bool = False,
 ) -> dict[str, int]:
     if workers < 1 or limit is not None and limit < 1:
         raise ValueError("workers和limit必须为正整数")
     if max_tokens < 1:
         raise ValueError("max_tokens必须为正整数")
-    total = sum(1 for _ in read_jsonl(review_samples_jsonl))
+    all_reviews = [record for _, record in read_jsonl(review_samples_jsonl)]
+    target = Path(output_jsonl)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    previous_results: dict[str, dict[str, Any]] = {}
+    if retry_errors:
+        if not target.exists():
+            raise ValueError("使用--retry-errors时输出文件必须已经存在")
+        previous_results = {
+            str(record.get("label_id", "")): record
+            for _, record in read_jsonl(output_jsonl)
+        }
+        selected_reviews = [
+            review
+            for review in all_reviews
+            if previous_results.get(str(review.get("label_id", "")), {}).get("status")
+            != "completed"
+        ]
+    else:
+        selected_reviews = all_reviews
     if limit is not None:
-        total = min(total, limit)
+        selected_reviews = selected_reviews[:limit]
+    total = len(selected_reviews)
     logger = configure_run_logger(log_file)
     client = OpenAI(
         api_key="not-required",
@@ -294,7 +314,7 @@ def diagnose(
     started_at = time.monotonic()
     logger.info(
         "run_started input=%s output=%s total_labels=%s workers=%s "
-        "timeout=%s model=%s base_url=%s",
+        "timeout=%s model=%s base_url=%s retry_errors=%s",
         review_samples_jsonl,
         output_jsonl,
         total,
@@ -302,6 +322,7 @@ def diagnose(
         timeout,
         model,
         base_url,
+        retry_errors,
     )
 
     def evaluate(review):
@@ -331,31 +352,50 @@ def diagnose(
             )
         return result
 
-    reviews = (record for _, record in read_jsonl(review_samples_jsonl))
-    if limit is not None:
-        reviews = islice(reviews, limit)
-    target = Path(output_jsonl)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", encoding="utf-8") as stream, ThreadPoolExecutor(max_workers=workers) as pool:
-        with tqdm(total=total, desc="Diagnosing label definitions") as progress:
-            while batch := list(islice(reviews, workers * 2)):
-                for result in pool.map(evaluate, batch):
+    def process_reviews(reviews, on_result):
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            with tqdm(total=total, desc="Diagnosing label definitions") as progress:
+                while batch := list(islice(reviews, workers * 2)):
+                    for result in pool.map(evaluate, batch):
+                        on_result(result)
+                        summary["attempted"] += 1
+                        summary["completed" if result["status"] == "completed" else "errors"] += 1
+                        logger.info(
+                            "progress=%s/%s status=%s label_id=%s definition_status=%s "
+                            "fixable=%s elapsed=%.1fs",
+                            summary["attempted"],
+                            total,
+                            result["status"],
+                            result["label_id"],
+                            result.get("definition_status"),
+                            result.get("definition_fixable"),
+                            time.monotonic() - started_at,
+                        )
+                        progress.update(1)
+
+    if retry_errors:
+        retried_results = {}
+
+        def keep_result(result):
+            retried_results[result["label_id"]] = result
+
+        process_reviews(iter(selected_reviews), keep_result)
+        temporary_target = target.with_name(target.name + ".tmp")
+        with temporary_target.open("w", encoding="utf-8") as stream:
+            for review in all_reviews:
+                label_id = str(review.get("label_id", ""))
+                result = retried_results.get(label_id) or previous_results.get(label_id)
+                if result is not None:
                     stream.write(json.dumps(result, ensure_ascii=False) + "\n")
-                    stream.flush()
-                    summary["attempted"] += 1
-                    summary["completed" if result["status"] == "completed" else "errors"] += 1
-                    logger.info(
-                        "progress=%s/%s status=%s label_id=%s definition_status=%s "
-                        "fixable=%s elapsed=%.1fs",
-                        summary["attempted"],
-                        total,
-                        result["status"],
-                        result["label_id"],
-                        result.get("definition_status"),
-                        result.get("definition_fixable"),
-                        time.monotonic() - started_at,
-                    )
-                    progress.update(1)
+        temporary_target.replace(target)
+    else:
+        with target.open("w", encoding="utf-8") as stream:
+
+            def write_result(result):
+                stream.write(json.dumps(result, ensure_ascii=False) + "\n")
+                stream.flush()
+
+            process_reviews(iter(selected_reviews), write_result)
     logger.info(
         "run_finished attempted=%s completed=%s errors=%s elapsed=%.1fs",
         summary["attempted"],
@@ -377,6 +417,11 @@ def main() -> None:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--max-tokens", type=int, default=768)
+    parser.add_argument(
+        "--retry-errors",
+        action="store_true",
+        help="Preserve completed rows and retry only error or missing labels",
+    )
     args = parser.parse_args()
     result = diagnose(
         args.review_samples_jsonl,
@@ -388,6 +433,7 @@ def main() -> None:
         args.limit,
         args.timeout,
         args.max_tokens,
+        args.retry_errors,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

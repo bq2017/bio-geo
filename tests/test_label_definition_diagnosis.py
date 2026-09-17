@@ -181,3 +181,54 @@ def test_insufficient_evidence_still_requires_complete_classification():
     }
     with pytest.raises(ValueError, match="每道高匹配样本"):
         diagnosis.validate_diagnosis(answer, review_record())
+
+
+def test_retry_errors_replaces_error_without_duplicating_completed_rows(tmp_path, monkeypatch):
+    source = tmp_path / "reviews.jsonl"
+    output = tmp_path / "diagnosis.jsonl"
+    log = tmp_path / "diagnosis.log"
+    completed_review = review_record()
+    completed_review["label_id"] = "label-completed"
+    error_review = review_record()
+    error_review["label_id"] = "label-error"
+    write_jsonl(source, [completed_review, error_review])
+    write_jsonl(
+        output,
+        [
+            {
+                "label_id": "label-completed",
+                "knw_label": "知识点@行星地球",
+                "status": "completed",
+                "preserved": True,
+            },
+            {
+                "label_id": "label-error",
+                "knw_label": "知识点@行星地球",
+                "status": "error",
+                "error_type": "ValueError",
+                "error": "分类不完整",
+            }
+        ],
+    )
+    monkeypatch.setattr(diagnosis, "OpenAI", FakeClient)
+
+    summary = diagnosis.diagnose(
+        str(source),
+        str(output),
+        str(log),
+        "http://example/v1",
+        "DeepSeek-V4-Flash",
+        retry_errors=True,
+    )
+
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    assert summary == {"attempted": 1, "completed": 1, "errors": 0}
+    assert len(rows) == 2
+    assert rows[0] == {
+        "label_id": "label-completed",
+        "knw_label": "知识点@行星地球",
+        "status": "completed",
+        "preserved": True,
+    }
+    assert rows[1]["label_id"] == "label-error"
+    assert rows[1]["status"] == "completed"
