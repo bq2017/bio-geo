@@ -22,8 +22,24 @@ def review_record():
         "match_rate": 0.5,
         "existing_interpretation": {"definition": "地球生命条件"},
         "adjacent_labels": [],
-        "high_score_examples": [{"question_id": "high-1", "question": {"stem": "高分题"}}],
-        "low_score_examples": [{"question_id": "low-1", "question": {"stem": "低分题"}}],
+        "high_score_examples": [
+            {
+                "question_id": "high-1",
+                "score": 0.85,
+                "grade": "A",
+                "model_reason": "高分理由",
+                "question": {"stem": "高分题", "options": "A. 选项", "analysis": "解析"},
+            }
+        ],
+        "low_score_examples": [
+            {
+                "question_id": "low-1",
+                "score": 0.20,
+                "grade": "D",
+                "model_reason": "低分理由",
+                "question": {"stem": "低分题", "options": "A. 选项", "analysis": "解析"},
+            }
+        ],
     }
 
 
@@ -76,6 +92,16 @@ def test_diagnose_writes_valid_definition_result(tmp_path, monkeypatch):
     assert result["definition_status"] == "too_narrow"
     assert result["definition_fixable"] is True
     assert result["low_score_definition_issue_ids"] == ["low-1"]
+    assert result["definition_issue_evidence_questions"] == [
+        {
+            "question_id": "low-1",
+            "score": 0.20,
+            "grade": "D",
+            "model_reason": "低分理由",
+            "question": {"stem": "低分题", "options": "A. 选项", "analysis": "解析"},
+            "evidence_type": "low_score_definition_issue",
+        }
+    ]
     log_text = log.read_text(encoding="utf-8")
     assert "run_started" in log_text
     assert "definition_status=too_narrow" in log_text
@@ -95,4 +121,20 @@ def test_validate_rejects_question_id_outside_samples():
         "revision_direction": "收窄范围。",
     }
     with pytest.raises(ValueError, match="输入样本之外"):
+        diagnosis.validate_diagnosis(answer, review_record())
+
+
+def test_validate_requires_every_low_sample_to_be_classified():
+    answer = {
+        "definition_status": "adequate",
+        "definition_fixable": False,
+        "analysis": "释义充分。",
+        "high_score_false_positive_ids": [],
+        "low_score_definition_issue_ids": [],
+        "unrelated_mislabel_ids": [],
+        "model_misjudgement_ids": [],
+        "teacher_review_required": False,
+        "revision_direction": "",
+    }
+    with pytest.raises(ValueError, match="每道低匹配样本"):
         diagnosis.validate_diagnosis(answer, review_record())

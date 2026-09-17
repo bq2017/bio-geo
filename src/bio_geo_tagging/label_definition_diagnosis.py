@@ -36,6 +36,8 @@ SYSTEM_PROMPT = """你是高中地理知识点释义诊断员。每次只诊断�
 如果第一阶段理由明显违背题目或释义，应归为model_misjudgement。
 高匹配率本身不能证明释义太宽，低匹配率本身也不能证明释义太窄；必须依据题目证据。
 只有存在可由修改释义解决的问题时，definition_fixable和teacher_review_required才为true。
+每道C/D级低匹配样本必须且只能归入low_score_definition_issue_ids、unrelated_mislabel_ids或model_misjudgement_ids之一。
+凡是用于证明释义存在问题的题目，必须写入high_score_false_positive_ids或low_score_definition_issue_ids。analysis中不要写题目ID，题目ID只写入对应数组。
 
 只输出JSON对象，字段必须为：
 {
@@ -128,30 +130,76 @@ def validate_diagnosis(answer: dict[str, Any], review: dict[str, Any]) -> dict[s
         for example in review.get("low_score_examples", [])
     }
     all_ids = high_ids | low_ids
+    high_false_positive_ids = validate_id_list(
+        answer.get("high_score_false_positive_ids"),
+        "high_score_false_positive_ids",
+        high_ids,
+    )
+    low_definition_issue_ids = validate_id_list(
+        answer.get("low_score_definition_issue_ids"),
+        "low_score_definition_issue_ids",
+        low_ids,
+    )
+    unrelated_mislabel_ids = validate_id_list(
+        answer.get("unrelated_mislabel_ids"),
+        "unrelated_mislabel_ids",
+        low_ids,
+    )
+    model_misjudgement_ids = validate_id_list(
+        answer.get("model_misjudgement_ids"),
+        "model_misjudgement_ids",
+        all_ids,
+    )
+    category_sets = [
+        set(high_false_positive_ids),
+        set(low_definition_issue_ids),
+        set(unrelated_mislabel_ids),
+        set(model_misjudgement_ids),
+    ]
+    if sum(len(values) for values in category_sets) != len(set().union(*category_sets)):
+        raise ValueError("同一道题不能同时归入多个诊断类别")
+    classified_low_ids = (
+        set(low_definition_issue_ids)
+        | set(unrelated_mislabel_ids)
+        | (set(model_misjudgement_ids) & low_ids)
+    )
+    if status != "insufficient_evidence" and classified_low_ids != low_ids:
+        raise ValueError("每道低匹配样本必须归入一个诊断类别")
+
+    definition_evidence_ids = high_false_positive_ids + low_definition_issue_ids
+    if fixable and not definition_evidence_ids:
+        raise ValueError("释义存在问题时必须提供证据题目ID")
+    if not fixable and definition_evidence_ids:
+        raise ValueError("释义无需修改时不能提供释义问题证据题目ID")
+    if status == "too_broad" and not high_false_positive_ids:
+        raise ValueError("too_broad必须提供高匹配假阳性题目ID")
+    if status == "too_narrow" and not low_definition_issue_ids:
+        raise ValueError("too_narrow必须提供低匹配释义问题题目ID")
+
+    example_by_id = {
+        str(example.get("question_id", "")): example
+        for example in review.get("high_score_examples", [])
+        + review.get("low_score_examples", [])
+    }
+    evidence_questions = []
+    for evidence_type, question_ids in (
+        ("high_score_false_positive", high_false_positive_ids),
+        ("low_score_definition_issue", low_definition_issue_ids),
+    ):
+        for question_id in question_ids:
+            evidence = dict(example_by_id[question_id])
+            evidence["evidence_type"] = evidence_type
+            evidence_questions.append(evidence)
+
     return {
         "definition_status": status,
         "definition_fixable": fixable,
         "analysis": analysis.strip(),
-        "high_score_false_positive_ids": validate_id_list(
-            answer.get("high_score_false_positive_ids"),
-            "high_score_false_positive_ids",
-            high_ids,
-        ),
-        "low_score_definition_issue_ids": validate_id_list(
-            answer.get("low_score_definition_issue_ids"),
-            "low_score_definition_issue_ids",
-            low_ids,
-        ),
-        "unrelated_mislabel_ids": validate_id_list(
-            answer.get("unrelated_mislabel_ids"),
-            "unrelated_mislabel_ids",
-            low_ids,
-        ),
-        "model_misjudgement_ids": validate_id_list(
-            answer.get("model_misjudgement_ids"),
-            "model_misjudgement_ids",
-            all_ids,
-        ),
+        "high_score_false_positive_ids": high_false_positive_ids,
+        "low_score_definition_issue_ids": low_definition_issue_ids,
+        "unrelated_mislabel_ids": unrelated_mislabel_ids,
+        "model_misjudgement_ids": model_misjudgement_ids,
+        "definition_issue_evidence_questions": evidence_questions,
         "teacher_review_required": teacher_review,
         "revision_direction": revision.strip(),
     }
