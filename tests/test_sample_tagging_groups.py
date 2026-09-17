@@ -1,6 +1,9 @@
 import json
 
-from bio_geo_tagging.sample_tagging_groups import sample_groups
+from bio_geo_tagging.sample_tagging_groups import (
+    load_high_score_valid_pairs,
+    sample_groups,
+)
 
 
 def write_jsonl(path, records):
@@ -195,3 +198,73 @@ def test_sample_groups_selects_requested_big_question_count(tmp_path):
     assert sum(bool(question["sub_questions"]) for question in sampled) == 2
     assert summary["sampled_big_questions"] == 2
     assert summary["sampled_ordinary_questions"] == 4
+
+
+def test_sample_groups_requires_every_label_to_be_high_score_valid(tmp_path):
+    catalog = tmp_path / "catalog.txt"
+    catalog.write_text(
+        "\n".join(f"知识点@标签{index}｜释义{index}" for index in range(414)) + "\n",
+        encoding="utf-8",
+    )
+    questions = [
+        {
+            "parent_id": "invalid-multi",
+            "question_id": "invalid-multi",
+            "stem": "两个标签但只有一个通过",
+            "knw_labels": ["知识点@标签0", "知识点@标签1"],
+            "sub_questions": [],
+        },
+        {
+            "parent_id": "ordinary",
+            "question_id": "ordinary",
+            "stem": "普通题",
+            "knw_labels": ["知识点@标签0"],
+            "sub_questions": [],
+        },
+        {
+            "parent_id": "big",
+            "question_id": "big",
+            "stem": "大题",
+            "knw_labels": ["知识点@标签1"],
+            "sub_questions": [{"question_id": "child", "stem": "小题"}],
+        },
+    ]
+    diagnoses = [
+        {
+            "status": "completed",
+            "knw_label": "知识点@标签0",
+            "high_score_valid_ids": ["invalid-multi", "ordinary"],
+        },
+        {
+            "status": "completed",
+            "knw_label": "知识点@标签1",
+            "high_score_valid_ids": ["big"],
+        },
+    ]
+    input_path = tmp_path / "questions.jsonl"
+    diagnosis_path = tmp_path / "diagnosis.jsonl"
+    output_path = tmp_path / "sample.jsonl"
+    summary_path = tmp_path / "summary.json"
+    write_jsonl(input_path, questions)
+    write_jsonl(diagnosis_path, diagnoses)
+
+    assert load_high_score_valid_pairs(diagnosis_path) == {
+        ("invalid-multi", "知识点@标签0"),
+        ("ordinary", "知识点@标签0"),
+        ("big", "知识点@标签1"),
+    }
+    summary = sample_groups(
+        input_path,
+        catalog,
+        output_path,
+        summary_path,
+        group_count=2,
+        seed=7,
+        big_questions=1,
+        diagnosis_path=diagnosis_path,
+    )
+
+    sampled = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    assert {question["question_id"] for question in sampled} == {"ordinary", "big"}
+    assert summary["eligible_groups"] == 2
+    assert summary["excluded_unvalidated_groups"] == 1

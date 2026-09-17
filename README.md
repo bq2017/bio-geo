@@ -145,6 +145,16 @@ PYTHONPATH=src python -m bio_geo_tagging.call1_candidate_retrieval \
 诊断文件逐题记录三批候选、收敛前候选以及是否执行收敛；原候选结果文件格式不变。
 重复执行同一命令会跳过已完成且有诊断记录的题目。
 
+如果要从释义诊断结果中提取原标签均已确认为有效的题目，可在抽样命令中增加：
+
+```bash
+  --diagnosis-jsonl runs/analysis/geography-label-definition-diagnosis-40pct.jsonl
+```
+
+脚本以“题目ID＋标签路径”为单位读取每个标签的 `high_score_valid_ids`。多标签题
+必须所有原标签都属于 `high_score_valid_ids` 才能进入样本；只确认部分标签的题目
+会被整体排除。汇总中的 `excluded_unvalidated_groups` 记录因此被排除的题目数。
+
 ## 原标签与原释义匹配评分
 
 先从释义对比结果中提取**现有释义**（不使用 DS 生成释义）：

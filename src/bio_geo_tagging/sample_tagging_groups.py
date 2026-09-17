@@ -14,6 +14,31 @@ from .call1_candidate_evaluation import read_jsonl
 from .call1_candidate_retrieval import as_text, load_catalog
 
 
+def load_high_score_valid_pairs(path: Path) -> set[tuple[str, str]]:
+    pairs: set[tuple[str, str]] = set()
+    for line_number, record in read_jsonl(path):
+        if record.get("status") != "completed":
+            continue
+        label = as_text(record.get("knw_label"))
+        question_ids = record.get("high_score_valid_ids")
+        if not label:
+            raise ValueError(f"诊断文件第{line_number}行缺少knw_label")
+        if not isinstance(question_ids, list) or not all(
+            isinstance(question_id, str) for question_id in question_ids
+        ):
+            raise ValueError(
+                f"诊断文件第{line_number}行high_score_valid_ids必须是字符串数组"
+            )
+        pairs.update(
+            (question_id.strip(), label)
+            for question_id in question_ids
+            if question_id.strip()
+        )
+    if not pairs:
+        raise ValueError("诊断文件中没有high_score_valid题目标签对")
+    return pairs
+
+
 def root_question_id(unit: dict[str, Any]) -> str:
     question_id = as_text(unit.get("question_id"))
     if not question_id:
@@ -32,20 +57,23 @@ def update_group(
     has_gold: bool,
     has_unmapped: bool,
     is_big_question: bool,
+    all_labels_valid: bool,
 ) -> None:
     connection.execute(
         """
         INSERT INTO groups (
             root_question_id, first_order, unit_count, root_count,
-            has_empty_stem, has_gold, has_unmapped, is_big_question
-        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+            has_empty_stem, has_gold, has_unmapped, is_big_question,
+            all_labels_valid
+        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(root_question_id) DO UPDATE SET
             unit_count = unit_count + 1,
             root_count = root_count + excluded.root_count,
             has_empty_stem = MAX(has_empty_stem, excluded.has_empty_stem),
             has_gold = MAX(has_gold, excluded.has_gold),
             has_unmapped = MAX(has_unmapped, excluded.has_unmapped),
-            is_big_question = MAX(is_big_question, excluded.is_big_question)
+            is_big_question = MAX(is_big_question, excluded.is_big_question),
+            all_labels_valid = MIN(all_labels_valid, excluded.all_labels_valid)
         """,
         (
             root_id,
@@ -55,6 +83,7 @@ def update_group(
             int(has_gold),
             int(has_unmapped),
             int(is_big_question),
+            int(all_labels_valid),
         ),
     )
 
@@ -63,6 +92,7 @@ def profile_groups(
     connection: sqlite3.Connection,
     input_path: Path,
     allowed_paths: set[str],
+    valid_pairs: set[tuple[str, str]] | None = None,
 ) -> int:
     total_units = 0
     for line_number, unit in read_jsonl(input_path):
@@ -75,6 +105,10 @@ def profile_groups(
         ):
             raise ValueError(f"题目文件第{line_number}行knw_labels必须是字符串数组")
         labels = {label.strip() for label in labels if label.strip()}
+        question_id = as_text(unit.get("question_id"))
+        all_labels_valid = valid_pairs is None or bool(labels) and all(
+            (question_id, label) in valid_pairs for label in labels
+        )
         sub_questions = unit.get("sub_questions")
         is_grouped_record = "sub_questions" in unit
         if is_grouped_record and (
@@ -104,6 +138,7 @@ def profile_groups(
             bool(labels),
             any(label not in allowed_paths for label in labels),
             is_big_question,
+            all_labels_valid,
         )
         total_units += 1
         if total_units % 10_000 == 0:
@@ -131,6 +166,7 @@ def reservoir_sample_group_ids(
           AND has_empty_stem = 0
           AND has_gold = 1
           AND has_unmapped = 0
+          AND all_labels_valid = 1
           {group_filter}
         ORDER BY first_order
     """
@@ -181,10 +217,16 @@ def sample_groups(
     group_count: int,
     seed: int,
     big_questions: int | None = None,
+    diagnosis_path: Path | None = None,
 ) -> dict[str, Any]:
     if big_questions is not None and not 0 <= big_questions <= group_count:
         raise ValueError("big_questions必须在0到groups之间")
     _, allowed_paths = load_catalog(catalog_path)
+    valid_pairs = (
+        load_high_score_valid_pairs(diagnosis_path)
+        if diagnosis_path is not None
+        else None
+    )
     with tempfile.TemporaryDirectory(prefix="tagging-sample-") as temp_dir:
         database_path = Path(temp_dir) / "groups.sqlite3"
         connection = sqlite3.connect(database_path)
@@ -201,11 +243,14 @@ def sample_groups(
                     has_empty_stem INTEGER,
                     has_gold INTEGER,
                     has_unmapped INTEGER,
-                    is_big_question INTEGER
+                    is_big_question INTEGER,
+                    all_labels_valid INTEGER
                 )
                 """
             )
-            total_units = profile_groups(connection, input_path, allowed_paths)
+            total_units = profile_groups(
+                connection, input_path, allowed_paths, valid_pairs
+            )
             if big_questions is None:
                 sampled_ids, eligible_groups = reservoir_sample_group_ids(
                     connection, group_count, seed
@@ -231,6 +276,10 @@ def sample_groups(
             )
             excluded_invalid_structure_groups = scalar(
                 connection, "SELECT COUNT(*) FROM groups WHERE root_count != 1"
+            )
+            excluded_unvalidated_groups = scalar(
+                connection,
+                "SELECT COUNT(*) FROM groups WHERE all_labels_valid = 0",
             )
             sampled_big_questions = sum(
                 1
@@ -262,6 +311,7 @@ def sample_groups(
         "excluded_no_gold_groups": excluded_no_gold_groups,
         "excluded_unmapped_groups": excluded_unmapped_groups,
         "excluded_invalid_structure_groups": excluded_invalid_structure_groups,
+        "excluded_unvalidated_groups": excluded_unvalidated_groups,
     }
     summary_output.parent.mkdir(parents=True, exist_ok=True)
     summary_output.write_text(
@@ -277,6 +327,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--catalog", type=Path, required=True)
+    parser.add_argument("--diagnosis-jsonl", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--summary-output", type=Path, required=True)
     parser.add_argument("--groups", type=int, default=1000)
@@ -297,6 +348,7 @@ def main() -> None:
         args.groups,
         args.seed,
         args.big_questions,
+        args.diagnosis_jsonl,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
