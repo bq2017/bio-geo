@@ -164,3 +164,20 @@ def test_prompt_defines_root_question_label_union_rule():
     assert "大题标签是公共题干以及所有小题所考查知识点的并集" in diagnosis.SYSTEM_PROMPT
     assert "任意一道小题直接考查当前知识点" in diagnosis.SYSTEM_PROMPT
     assert "应归为model_misjudgement" in diagnosis.SYSTEM_PROMPT
+
+
+def test_insufficient_evidence_still_requires_complete_classification():
+    answer = {
+        "definition_status": "insufficient_evidence",
+        "definition_fixable": False,
+        "analysis": "现有样本不足以判断释义是否存在问题。",
+        "high_score_valid_ids": [],
+        "high_score_false_positive_ids": [],
+        "low_score_definition_issue_ids": [],
+        "unrelated_mislabel_ids": ["low-1"],
+        "model_misjudgement_ids": [],
+        "teacher_review_required": False,
+        "revision_direction": "",
+    }
+    with pytest.raises(ValueError, match="每道高匹配样本"):
+        diagnosis.validate_diagnosis(answer, review_record())

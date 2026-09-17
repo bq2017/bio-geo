@@ -173,14 +173,14 @@ def validate_diagnosis(answer: dict[str, Any], review: dict[str, Any]) -> dict[s
         | set(high_false_positive_ids)
         | (set(model_misjudgement_ids) & high_ids)
     )
-    if status != "insufficient_evidence" and classified_high_ids != high_ids:
+    if classified_high_ids != high_ids:
         raise ValueError("每道高匹配样本必须归入一个诊断类别")
     classified_low_ids = (
         set(low_definition_issue_ids)
         | set(unrelated_mislabel_ids)
         | (set(model_misjudgement_ids) & low_ids)
     )
-    if status != "insufficient_evidence" and classified_low_ids != low_ids:
+    if classified_low_ids != low_ids:
         raise ValueError("每道低匹配样本必须归入一个诊断类别")
 
     definition_evidence_ids = high_false_positive_ids + low_definition_issue_ids
