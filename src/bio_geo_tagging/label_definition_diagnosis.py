@@ -26,6 +26,7 @@ DEFINITION_STATUSES = {
 SYSTEM_PROMPT = """你是高中地理知识点释义诊断员。每次只诊断一个知识点。
 输入包含原释义、相邻知识点、A/B级高匹配题和C/D级低匹配题。第一阶段分数只用于抽样，不代表最终正确。
 这些题目只是从该标签现有题目中抽取的阶段性样本，不代表全部题目。不得把样本结论表述为“所有高匹配题”或“所有低匹配题”，也不得把样本直接外推为整个标签；证据不足时必须输出insufficient_evidence。
+每个样本都是一道完整大题。大题标签是公共题干以及所有小题所考查知识点的并集：只要公共题干或任意一道小题直接考查当前知识点，该大题就与当前标签有效匹配。不得因为当前知识点只出现在部分小题、不是整道大题的主要主题，就将其判为假阳性、无关误标或释义问题。
 
 你的目标是判断：当前问题是否能通过修改释义解决。
 必须同时检查两个方向：
@@ -34,6 +35,7 @@ SYSTEM_PROMPT = """你是高中地理知识点释义诊断员。每次只诊断�
 
 如果题目与标签完全无关，应归为unrelated_mislabel。这是历史误标或不可控噪声，不得通过扩大释义把它纳入。
 如果第一阶段理由明显违背题目或释义，应归为model_misjudgement。
+如果大题的任意一道小题直接考查当前知识点，但第一阶段因为它只出现在部分小题而给出低分，应归为model_misjudgement，不得归为low_score_definition_issue。
 高匹配率本身不能证明释义太宽，低匹配率本身也不能证明释义太窄；必须依据题目证据。
 只有存在可由修改释义解决的问题时，definition_fixable和teacher_review_required才为true。
 每道A/B级高匹配样本必须且只能归入high_score_valid_ids、high_score_false_positive_ids或model_misjudgement_ids之一。
@@ -238,6 +240,7 @@ def request_diagnosis(
             "match_rate": review.get("match_rate"),
         },
         "sampling_note": "每组最多10题：一半为接近分级阈值的边界题，一半为固定抽样题；这些题仅代表样本。",
+        "root_label_rule": "大题标签是公共题干和所有小题知识点的并集；任意小题直接考查该知识点即为有效匹配。",
         "high_score_examples": review.get("high_score_examples", []),
         "low_score_examples": review.get("low_score_examples", []),
     }

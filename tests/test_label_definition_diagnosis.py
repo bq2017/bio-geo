@@ -158,3 +158,9 @@ def test_validate_requires_every_high_sample_to_be_classified():
     }
     with pytest.raises(ValueError, match="每道高匹配样本"):
         diagnosis.validate_diagnosis(answer, review_record())
+
+
+def test_prompt_defines_root_question_label_union_rule():
+    assert "大题标签是公共题干以及所有小题所考查知识点的并集" in diagnosis.SYSTEM_PROMPT
+    assert "任意一道小题直接考查当前知识点" in diagnosis.SYSTEM_PROMPT
+    assert "应归为model_misjudgement" in diagnosis.SYSTEM_PROMPT
