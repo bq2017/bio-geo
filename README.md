@@ -184,6 +184,22 @@ D级”的知识点列为异常候选。另为所有已覆盖标签生成待诊�
 包含10道A/B级高匹配题和10道C/D级低匹配题，用于同时检查释义过宽、过窄和
 边界歧义；题量不足时保留全部可用题目。
 
+将所有标签的待诊断样本逐条交给DeepSeek，判断问题能否通过修改释义解决：
+
+```bash
+PYTHONPATH=src python -m bio_geo_tagging.label_definition_diagnosis \
+  --review-samples-jsonl runs/analysis/geography-label-review-samples-40pct.jsonl \
+  --output-jsonl runs/analysis/geography-label-definition-diagnosis-40pct.jsonl \
+  --log-file runs/logs/geography-label-definition-diagnosis-40pct.log \
+  --base-url http://172.22.0.35:9204/v1 \
+  --model DeepSeek-V4-Flash \
+  --workers 1 \
+  --limit 3
+```
+
+诊断会同时检查高匹配假阳性和低匹配假阴性，并将完全无关的历史误标单独列为
+`unrelated_mislabel_ids`。先用少量标签验证结果，再去掉 `--limit` 执行阶段性全量。
+
 ## 知识点释义分析
 
 第一步仅根据完整知识点路径生成模型释义：

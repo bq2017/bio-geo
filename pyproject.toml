@@ -25,6 +25,7 @@ question-label-candidates = "bio_geo_tagging.call1_candidate_retrieval:main"
 question-label-candidates-evaluate = "bio_geo_tagging.call1_candidate_evaluation:main"
 question-label-match = "bio_geo_tagging.question_label_match:main"
 question-label-analysis = "bio_geo_tagging.label_match_analysis:main"
+question-label-diagnose = "bio_geo_tagging.label_definition_diagnosis:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
