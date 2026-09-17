@@ -161,3 +161,37 @@ def test_sample_groups_accepts_nested_complete_questions(tmp_path):
     assert summary["sampled_units"] == 2
     assert summary["sampled_big_questions"] == 1
     assert summary["sampled_ordinary_questions"] == 1
+
+
+def test_sample_groups_selects_requested_big_question_count(tmp_path):
+    catalog = tmp_path / "catalog.txt"
+    catalog.write_text(
+        "\n".join(f"知识点@标签{index}｜释义{index}" for index in range(414)) + "\n",
+        encoding="utf-8",
+    )
+    questions = [
+        {
+            "parent_id": str(index),
+            "question_id": str(index),
+            "stem": f"题目{index}",
+            "knw_labels": ["知识点@标签0"],
+            "sub_questions": [{"question_id": f"{index}-1", "stem": "小题"}]
+            if index < 3 else [],
+        }
+        for index in range(10)
+    ]
+    input_path = tmp_path / "questions.jsonl"
+    output_path = tmp_path / "sample.jsonl"
+    summary_path = tmp_path / "summary.json"
+    write_jsonl(input_path, questions)
+
+    summary = sample_groups(
+        input_path, catalog, output_path, summary_path,
+        group_count=6, seed=7, big_questions=2,
+    )
+
+    sampled = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    assert len(sampled) == 6
+    assert sum(bool(question["sub_questions"]) for question in sampled) == 2
+    assert summary["sampled_big_questions"] == 2
+    assert summary["sampled_ordinary_questions"] == 4

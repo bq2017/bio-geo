@@ -113,18 +113,25 @@ def profile_groups(
 
 
 def reservoir_sample_group_ids(
-    connection: sqlite3.Connection, group_count: int, seed: int
+    connection: sqlite3.Connection, group_count: int, seed: int,
+    group_type: str | None = None,
 ) -> tuple[set[str], int]:
     rng = random.Random(seed)
     sample: list[str] = []
     eligible_count = 0
-    query = """
+    group_filter = ""
+    if group_type == "big":
+        group_filter = "AND (unit_count > 1 OR is_big_question = 1)"
+    elif group_type == "ordinary":
+        group_filter = "AND unit_count = 1 AND is_big_question = 0"
+    query = f"""
         SELECT root_question_id
         FROM groups
         WHERE root_count = 1
           AND has_empty_stem = 0
           AND has_gold = 1
           AND has_unmapped = 0
+          {group_filter}
         ORDER BY first_order
     """
     for (root_id,) in connection.execute(query):
@@ -173,7 +180,10 @@ def sample_groups(
     summary_output: Path,
     group_count: int,
     seed: int,
+    big_questions: int | None = None,
 ) -> dict[str, Any]:
+    if big_questions is not None and not 0 <= big_questions <= group_count:
+        raise ValueError("big_questions必须在0到groups之间")
     _, allowed_paths = load_catalog(catalog_path)
     with tempfile.TemporaryDirectory(prefix="tagging-sample-") as temp_dir:
         database_path = Path(temp_dir) / "groups.sqlite3"
@@ -196,9 +206,19 @@ def sample_groups(
                 """
             )
             total_units = profile_groups(connection, input_path, allowed_paths)
-            sampled_ids, eligible_groups = reservoir_sample_group_ids(
-                connection, group_count, seed
-            )
+            if big_questions is None:
+                sampled_ids, eligible_groups = reservoir_sample_group_ids(
+                    connection, group_count, seed
+                )
+            else:
+                big_ids, eligible_big = reservoir_sample_group_ids(
+                    connection, big_questions, seed, "big"
+                )
+                ordinary_ids, eligible_ordinary = reservoir_sample_group_ids(
+                    connection, group_count - big_questions, seed + 1, "ordinary"
+                )
+                sampled_ids = big_ids | ordinary_ids
+                eligible_groups = eligible_big + eligible_ordinary
             total_groups = scalar(connection, "SELECT COUNT(*) FROM groups")
             excluded_empty_stem_groups = scalar(
                 connection, "SELECT COUNT(*) FROM groups WHERE has_empty_stem = 1"
@@ -260,6 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--summary-output", type=Path, required=True)
     parser.add_argument("--groups", type=int, default=1000)
+    parser.add_argument("--big-questions", type=int)
     parser.add_argument("--seed", type=int, default=20260916)
     return parser
 
@@ -275,6 +296,7 @@ def main() -> None:
         args.summary_output,
         args.groups,
         args.seed,
+        args.big_questions,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 

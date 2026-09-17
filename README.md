@@ -121,6 +121,30 @@ question-label-candidates-evaluate \
 打标单元，因此不使用 `--group-by-root`。汇总文件记录全量覆盖率和逐标签
 召回率；明细文件记录漏召回标签以及无法与当前414个标签对应的原标签。
 
+诊断调用一的漏召回和无关候选时，可以从完整原题中随机抽取100题，指定50道大题
+和50道普通题，并保存每批召回及收敛前后的候选：
+
+```bash
+PYTHONPATH=src python -m bio_geo_tagging.sample_tagging_groups \
+  --input data/processed/geography-merged-with-labels.jsonl \
+  --catalog data/processed/geography-labels-call1-catalog.txt \
+  --output data/annotation/geography-whole-question-sample-100.jsonl \
+  --summary-output runs/tagging/geography-whole-question-sample-100-summary.json \
+  --groups 100 --big-questions 50 --seed 20260917
+
+PYTHONPATH=src python -m bio_geo_tagging.call1_candidate_retrieval \
+  --input data/annotation/geography-whole-question-sample-100.jsonl \
+  --catalog data/processed/geography-labels-call1-catalog.txt \
+  --output runs/tagging/geography-call1-sample-100-candidates.jsonl \
+  --trace-output runs/tagging/geography-call1-sample-100-trace.jsonl \
+  --log-file runs/logs/geography-call1-sample-100.log \
+  --base-url http://172.22.0.35:9204/v1 \
+  --model DeepSeek-V4-Flash --concurrency 20
+```
+
+诊断文件逐题记录三批候选、收敛前候选以及是否执行收敛；原候选结果文件格式不变。
+重复执行同一命令会跳过已完成且有诊断记录的题目。
+
 ## 原标签与原释义匹配评分
 
 先从释义对比结果中提取**现有释义**（不使用 DS 生成释义）：

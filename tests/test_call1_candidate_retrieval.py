@@ -3,12 +3,14 @@ import json
 import pytest
 
 from bio_geo_tagging.call1_candidate_retrieval import (
+    DeepSeekCandidateRetriever,
     build_question_text,
     get_input_role,
     load_catalog,
     load_units,
     normalize_shard_result,
     parse_or_recover_result,
+    run_retrieval,
     split_catalog,
     validate_result,
 )
@@ -213,3 +215,39 @@ def test_validate_result_rejects_invalid_candidates(candidate_labels):
             {"candidate_labels": candidate_labels, "uncovered_topic": None},
             allowed,
         )
+
+
+def test_trace_records_each_shard_and_resume(monkeypatch, tmp_path):
+    catalog = "\n".join(f"知识点@标签{i}｜释义{i}" for i in range(3))
+    unit = {"parent_id": "q1", "question_id": "q1", "stem": "题目", "sub_questions": []}
+    output = tmp_path / "candidates.jsonl"
+    trace_output = tmp_path / "trace.jsonl"
+
+    def fake_request(self, system_prompt, question_text):
+        label = next(
+            line.split("｜", 1)[0]
+            for line in system_prompt.splitlines()
+            if line.startswith("知识点@")
+        )
+        return json.dumps({"candidate_labels": [label]}, ensure_ascii=False)
+
+    monkeypatch.setattr(DeepSeekCandidateRetriever, "request", fake_request)
+    arguments = (
+        [unit], catalog, {f"知识点@标签{i}" for i in range(3)},
+        output, "test-model", "http://example.test/v1", None, 1, 1, 10.0, None,
+        trace_output,
+    )
+
+    first = run_retrieval(*arguments)
+    second = run_retrieval(*arguments)
+
+    assert first["completed"] == 1
+    assert second["completed"] == 0
+    assert len(output.read_text(encoding="utf-8").splitlines()) == 1
+    traces = [json.loads(line) for line in trace_output.read_text(encoding="utf-8").splitlines()]
+    assert len(traces) == 1
+    assert traces[0]["shard_candidate_labels"] == [
+        ["知识点@标签0"], ["知识点@标签1"], ["知识点@标签2"]
+    ]
+    assert traces[0]["before_consolidation"] == traces[0]["candidate_labels"]
+    assert traces[0]["consolidation_used"] is False

@@ -380,9 +380,10 @@ class DeepSeekCandidateRetriever:
             raise ValueError(f"候选收敛后仍超过20个：{len(labels)}")
         return labels
 
-    def retrieve(self, unit: dict[str, Any]) -> tuple[list[str], str | None]:
+    def retrieve(self, unit: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
         question_text = build_question_text(unit)
         candidates: list[str] = []
+        shard_candidates: list[list[str]] = []
         for part_number, (system_prompt, allowed_paths) in enumerate(
             self.catalog_parts, start=1
         ):
@@ -390,11 +391,19 @@ class DeepSeekCandidateRetriever:
             if not content.strip():
                 raise ValueError(f"第{part_number}批DS返回空内容")
             result = parse_or_recover_result(content, allowed_paths)
-            candidates.extend(normalize_shard_result(result, allowed_paths))
+            labels = normalize_shard_result(result, allowed_paths)
+            shard_candidates.append(labels)
+            candidates.extend(labels)
+        before_consolidation = candidates.copy()
         if len(candidates) > 20:
             logging.info("三批合并得到%s个候选，执行候选收敛", len(candidates))
             candidates = self.consolidate(question_text, candidates)
-        return candidates, None
+        return candidates, {
+            "shard_candidate_labels": shard_candidates,
+            "before_consolidation": before_consolidation,
+            "consolidation_used": len(before_consolidation) > 20,
+            "candidate_labels": candidates,
+        }
 
 
 def load_completed(output_path: Path) -> dict[str, dict[str, Any]]:
@@ -431,6 +440,7 @@ def run_retrieval(
     retries: int,
     timeout: float,
     limit: int | None,
+    trace_output: Path | None = None,
 ) -> dict[str, int]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     catalog_parts = split_catalog(catalog)
@@ -441,6 +451,20 @@ def run_retrieval(
         raise ValueError(f"输出文件含有不属于当前输入的记录：{sorted(stale_keys)}")
     for record in completed.values():
         validate_result(record, allowed_paths)
+    trace_keys: set[str] = set()
+    if trace_output is not None:
+        trace_output.parent.mkdir(parents=True, exist_ok=True)
+        if trace_output.exists():
+            with trace_output.open("r", encoding="utf-8") as stream:
+                for line in stream:
+                    if line.strip():
+                        trace_keys.add(as_text(json.loads(line).get("unit_key")))
+        missing_trace = set(completed).difference(trace_keys)
+        if missing_trace:
+            raise ValueError(
+                "已有候选结果缺少诊断记录，请为本次测试使用新的输出文件："
+                f"{sorted(missing_trace)[:3]}"
+            )
     pending = [unit for unit in units if make_unit_key(unit) not in completed]
     if limit is not None:
         pending = pending[:limit]
@@ -463,13 +487,13 @@ def run_retrieval(
                 )
             return thread_local_retrievers[thread_id]
 
-    def process(unit: dict[str, Any]) -> dict[str, Any]:
+    def process(unit: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         unit_key = make_unit_key(unit)
         last_error: Exception | None = None
         for attempt in range(1, retries + 1):
             try:
-                candidate_labels, uncovered_topic = get_retriever().retrieve(unit)
-                return {
+                candidate_labels, trace = get_retriever().retrieve(unit)
+                record = {
                     "unit_key": unit_key,
                     "question_id": as_text(unit.get("question_id")),
                     "root_question_id": as_text(
@@ -479,11 +503,12 @@ def run_retrieval(
                     ),
                     "input_role": get_input_role(unit),
                     "candidate_labels": candidate_labels,
-                    "uncovered_topic": uncovered_topic,
+                    "uncovered_topic": None,
                     "model": model,
                     "endpoint": base_url,
                     "status": "completed",
                 }
+                return record, {"unit_key": unit_key, **trace}
             except Exception as error:
                 last_error = error
                 logging.warning(
@@ -494,13 +519,17 @@ def run_retrieval(
     errors = 0
     with (
         output_path.open("a", encoding="utf-8") as output_stream,
+        (trace_output.open("a", encoding="utf-8") if trace_output else open(os.devnull, "w")) as trace_stream,
         ThreadPoolExecutor(max_workers=concurrency) as executor,
         tqdm(total=len(pending), desc="Retrieving candidates") as progress,
     ):
         futures = {executor.submit(process, unit): unit for unit in pending}
         for future in as_completed(futures):
             try:
-                record = future.result()
+                record, trace = future.result()
+                if trace_output is not None:
+                    trace_stream.write(json.dumps(trace, ensure_ascii=False) + "\n")
+                    trace_stream.flush()
                 completed[record["unit_key"]] = record
                 output_stream.write(json.dumps(record, ensure_ascii=False) + "\n")
                 output_stream.flush()
@@ -529,6 +558,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--catalog", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--trace-output", type=Path)
     parser.add_argument("--log-file", type=Path, required=True)
     parser.add_argument("--model", default=os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL))
     parser.add_argument(
@@ -570,6 +600,7 @@ def main() -> None:
         args.retries,
         args.timeout,
         args.limit,
+        args.trace_output,
     )
     summary["skipped_empty_stem"] = skipped_empty_stem
     print(json.dumps(summary, ensure_ascii=False, indent=2))
