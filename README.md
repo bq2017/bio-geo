@@ -158,6 +158,29 @@ question-label-match score \
 `scored`，材料不足为 `unjudgeable`。代码会强制检查 `unjudgeable` 必须对应
 `score=null`，避免将缺图题误记为0分。
 
+### 阶段性异常知识点分析
+
+先复制正在写入的评分结果作为阶段性快照，再按历史报告口径生成ABCD统计、异常
+知识点JSONL和带完整题目示例的Markdown报告：
+
+```bash
+cp runs/validation/geography-label-match.jsonl \
+  runs/validation/geography-label-match-40pct.jsonl
+
+PYTHONPATH=src python -m bio_geo_tagging.label_match_analysis \
+  --match-jsonl runs/validation/geography-label-match-40pct.jsonl \
+  --questions-jsonl data/processed/geography-merged-with-labels.jsonl \
+  --definitions-jsonl data/taxonomy/geography-existing-definitions.jsonl \
+  --statistics-json runs/analysis/geography-label-statistics-40pct.json \
+  --anomalies-jsonl runs/analysis/geography-label-anomalies-40pct.jsonl \
+  --report-md runs/reports/geography-label-analysis-40pct.md \
+  --scope-label "40%阶段性快照"
+```
+
+ABCD阈值为：A≥0.80、B为0.70～0.79、C为0.40～0.69、D<0.40。
+默认将“至少5条且D级不少于3条、D级占比不低于30%”或“至少3条且全部为
+D级”的知识点列为异常候选。每个候选最多展示3道D级题和2道A/B级对照题。
+
 ## 知识点释义分析
 
 第一步仅根据完整知识点路径生成模型释义：
