@@ -2,6 +2,7 @@
 
 import argparse
 from collections import Counter, defaultdict
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -95,6 +96,46 @@ def compact_question(question: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def select_review_records(
+    records: list[dict[str, Any]],
+    limit: int,
+    label_id: str,
+    group: str,
+) -> list[dict[str, Any]]:
+    """Select boundary cases plus a deterministic sample of the remaining records."""
+    if limit <= 0 or not records:
+        return []
+    if group not in {"high", "low"}:
+        raise ValueError("group必须为high或low")
+
+    boundary_order = sorted(
+        records,
+        key=(
+            (lambda record: (record["score"], str(record["question_id"])))
+            if group == "high"
+            else (lambda record: (-record["score"], str(record["question_id"])))
+        ),
+    )
+    if len(boundary_order) <= limit:
+        return boundary_order
+
+    boundary_count = min((limit + 1) // 2, len(boundary_order))
+    boundary = boundary_order[:boundary_count]
+    boundary_ids = {str(record["question_id"]) for record in boundary}
+    remaining = [
+        record
+        for record in records
+        if str(record["question_id"]) not in boundary_ids
+    ]
+
+    def stable_rank(record: dict[str, Any]) -> str:
+        source = f"{label_id}:{group}:{record['question_id']}".encode("utf-8")
+        return hashlib.sha256(source).hexdigest()
+
+    sampled = sorted(remaining, key=stable_rank)[: limit - boundary_count]
+    return boundary + sampled
+
+
 def analyze(
     match_jsonl: str,
     questions_jsonl: str,
@@ -174,14 +215,18 @@ def analyze(
             "anomaly_reason": reason,
         }
         label_statistics.append(statistic)
-        low_records = sorted(
-            (record for record in records if record["grade"] in {"C", "D"}),
-            key=lambda record: (record["score"], record["question_id"]),
-        )[:low_examples]
-        high_records = sorted(
-            (record for record in records if record["grade"] in {"A", "B"}),
-            key=lambda record: (-record["score"], record["question_id"]),
-        )[:high_examples]
+        low_records = select_review_records(
+            [record for record in records if record["grade"] in {"C", "D"}],
+            low_examples,
+            label_id,
+            "low",
+        )
+        high_records = select_review_records(
+            [record for record in records if record["grade"] in {"A", "B"}],
+            high_examples,
+            label_id,
+            "high",
+        )
 
         def make_examples(selected):
             nonlocal missing_question_examples

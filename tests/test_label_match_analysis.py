@@ -120,7 +120,7 @@ def test_analyze_builds_anomaly_examples_and_report(tmp_path):
     stats = json.loads(statistics.read_text(encoding="utf-8"))
     assert stats["grade_counts"] == {"A": 3, "B": 0, "C": 0, "D": 3}
     anomaly = json.loads(anomalies.read_text(encoding="utf-8"))
-    assert [example["question_id"] for example in anomaly["low_score_examples"]] == ["q1", "q2", "q3"]
+    assert [example["question_id"] for example in anomaly["low_score_examples"]] == ["q3", "q2", "q1"]
     assert len(anomaly["high_score_examples"]) == 2
     review_rows = [json.loads(line) for line in reviews.read_text(encoding="utf-8").splitlines()]
     assert {review["label_id"] for review in review_rows} == {"label-1", "label-2"}
@@ -137,3 +137,30 @@ def test_analyze_builds_anomaly_examples_and_report(tmp_path):
 def test_all_d_three_samples_is_anomaly():
     grades = Counter({"D": 3})
     assert analysis.anomaly_reason(3, grades, 5, 3, 0.30, 3)
+
+
+def test_review_sampling_keeps_boundaries_and_is_deterministic():
+    high_records = [
+        {"question_id": f"h{index}", "score": score}
+        for index, score in enumerate(
+            [0.70, 0.71, 0.72, 0.73, 0.74, 0.80, 0.85, 0.90, 0.91, 0.92, 0.93, 0.94, 0.95],
+            1,
+        )
+    ]
+    low_records = [
+        {"question_id": f"l{index}", "score": score}
+        for index, score in enumerate(
+            [0.00, 0.05, 0.10, 0.20, 0.30, 0.34, 0.35, 0.36, 0.37, 0.38, 0.39, 0.40, 0.50, 0.60, 0.69],
+            1,
+        )
+    ]
+
+    selected_high = analysis.select_review_records(high_records, 10, "label-1", "high")
+    selected_low = analysis.select_review_records(low_records, 10, "label-1", "low")
+
+    assert [record["score"] for record in selected_high[:5]] == [0.70, 0.71, 0.72, 0.73, 0.74]
+    assert [record["score"] for record in selected_low[:5]] == [0.69, 0.60, 0.50, 0.40, 0.39]
+    assert len({record["question_id"] for record in selected_high}) == 10
+    assert len({record["question_id"] for record in selected_low}) == 10
+    assert selected_high == analysis.select_review_records(high_records, 10, "label-1", "high")
+    assert selected_low == analysis.select_review_records(low_records, 10, "label-1", "low")

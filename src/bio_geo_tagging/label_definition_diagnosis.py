@@ -25,6 +25,7 @@ DEFINITION_STATUSES = {
 
 SYSTEM_PROMPT = """你是高中地理知识点释义诊断员。每次只诊断一个知识点。
 输入包含原释义、相邻知识点、A/B级高匹配题和C/D级低匹配题。第一阶段分数只用于抽样，不代表最终正确。
+这些题目只是从该标签现有题目中抽取的阶段性样本，不代表全部题目。不得把样本结论表述为“所有高匹配题”或“所有低匹配题”，也不得把样本直接外推为整个标签；证据不足时必须输出insufficient_evidence。
 
 你的目标是判断：当前问题是否能通过修改释义解决。
 必须同时检查两个方向：
@@ -172,6 +173,7 @@ def request_diagnosis(
             "grade_counts": review.get("grade_counts", {}),
             "match_rate": review.get("match_rate"),
         },
+        "sampling_note": "每组最多10题：一半为接近分级阈值的边界题，一半为固定抽样题；这些题仅代表样本。",
         "high_score_examples": review.get("high_score_examples", []),
         "low_score_examples": review.get("low_score_examples", []),
     }
