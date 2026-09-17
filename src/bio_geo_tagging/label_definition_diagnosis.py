@@ -36,6 +36,7 @@ SYSTEM_PROMPT = """你是高中地理知识点释义诊断员。每次只诊断�
 如果第一阶段理由明显违背题目或释义，应归为model_misjudgement。
 高匹配率本身不能证明释义太宽，低匹配率本身也不能证明释义太窄；必须依据题目证据。
 只有存在可由修改释义解决的问题时，definition_fixable和teacher_review_required才为true。
+每道A/B级高匹配样本必须且只能归入high_score_valid_ids、high_score_false_positive_ids或model_misjudgement_ids之一。
 每道C/D级低匹配样本必须且只能归入low_score_definition_issue_ids、unrelated_mislabel_ids或model_misjudgement_ids之一。
 凡是用于证明释义存在问题的题目，必须写入high_score_false_positive_ids或low_score_definition_issue_ids。analysis中不要写题目ID，题目ID只写入对应数组。
 
@@ -44,6 +45,7 @@ SYSTEM_PROMPT = """你是高中地理知识点释义诊断员。每次只诊断�
   "definition_status":"adequate|too_broad|too_narrow|ambiguous|boundary_missing|multiple_issues|insufficient_evidence",
   "definition_fixable":true或false,
   "analysis":"一段简洁中文结论",
+  "high_score_valid_ids":["题目ID"],
   "high_score_false_positive_ids":["题目ID"],
   "low_score_definition_issue_ids":["题目ID"],
   "unrelated_mislabel_ids":["题目ID"],
@@ -130,6 +132,11 @@ def validate_diagnosis(answer: dict[str, Any], review: dict[str, Any]) -> dict[s
         for example in review.get("low_score_examples", [])
     }
     all_ids = high_ids | low_ids
+    high_valid_ids = validate_id_list(
+        answer.get("high_score_valid_ids"),
+        "high_score_valid_ids",
+        high_ids,
+    )
     high_false_positive_ids = validate_id_list(
         answer.get("high_score_false_positive_ids"),
         "high_score_false_positive_ids",
@@ -151,6 +158,7 @@ def validate_diagnosis(answer: dict[str, Any], review: dict[str, Any]) -> dict[s
         all_ids,
     )
     category_sets = [
+        set(high_valid_ids),
         set(high_false_positive_ids),
         set(low_definition_issue_ids),
         set(unrelated_mislabel_ids),
@@ -158,6 +166,13 @@ def validate_diagnosis(answer: dict[str, Any], review: dict[str, Any]) -> dict[s
     ]
     if sum(len(values) for values in category_sets) != len(set().union(*category_sets)):
         raise ValueError("同一道题不能同时归入多个诊断类别")
+    classified_high_ids = (
+        set(high_valid_ids)
+        | set(high_false_positive_ids)
+        | (set(model_misjudgement_ids) & high_ids)
+    )
+    if status != "insufficient_evidence" and classified_high_ids != high_ids:
+        raise ValueError("每道高匹配样本必须归入一个诊断类别")
     classified_low_ids = (
         set(low_definition_issue_ids)
         | set(unrelated_mislabel_ids)
@@ -195,6 +210,7 @@ def validate_diagnosis(answer: dict[str, Any], review: dict[str, Any]) -> dict[s
         "definition_status": status,
         "definition_fixable": fixable,
         "analysis": analysis.strip(),
+        "high_score_valid_ids": high_valid_ids,
         "high_score_false_positive_ids": high_false_positive_ids,
         "low_score_definition_issue_ids": low_definition_issue_ids,
         "unrelated_mislabel_ids": unrelated_mislabel_ids,

@@ -52,6 +52,7 @@ class FakeClient:
             "definition_status": "too_narrow",
             "definition_fixable": True,
             "analysis": "低分题本应属于该标签，但原释义遗漏比较其他行星。",
+            "high_score_valid_ids": ["high-1"],
             "high_score_false_positive_ids": [],
             "low_score_definition_issue_ids": ["low-1"],
             "unrelated_mislabel_ids": [],
@@ -113,6 +114,7 @@ def test_validate_rejects_question_id_outside_samples():
         "definition_status": "too_broad",
         "definition_fixable": True,
         "analysis": "释义太宽。",
+        "high_score_valid_ids": ["high-1"],
         "high_score_false_positive_ids": ["not-in-input"],
         "low_score_definition_issue_ids": [],
         "unrelated_mislabel_ids": [],
@@ -129,6 +131,7 @@ def test_validate_requires_every_low_sample_to_be_classified():
         "definition_status": "adequate",
         "definition_fixable": False,
         "analysis": "释义充分。",
+        "high_score_valid_ids": ["high-1"],
         "high_score_false_positive_ids": [],
         "low_score_definition_issue_ids": [],
         "unrelated_mislabel_ids": [],
@@ -137,4 +140,21 @@ def test_validate_requires_every_low_sample_to_be_classified():
         "revision_direction": "",
     }
     with pytest.raises(ValueError, match="每道低匹配样本"):
+        diagnosis.validate_diagnosis(answer, review_record())
+
+
+def test_validate_requires_every_high_sample_to_be_classified():
+    answer = {
+        "definition_status": "adequate",
+        "definition_fixable": False,
+        "analysis": "释义充分。",
+        "high_score_valid_ids": [],
+        "high_score_false_positive_ids": [],
+        "low_score_definition_issue_ids": [],
+        "unrelated_mislabel_ids": ["low-1"],
+        "model_misjudgement_ids": [],
+        "teacher_review_required": False,
+        "revision_direction": "",
+    }
+    with pytest.raises(ValueError, match="每道高匹配样本"):
         diagnosis.validate_diagnosis(answer, review_record())

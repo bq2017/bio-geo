@@ -200,7 +200,8 @@ PYTHONPATH=src python -m bio_geo_tagging.label_definition_diagnosis \
 ```
 
 诊断会同时检查高匹配假阳性和低匹配假阴性，并将完全无关的历史误标单独列为
-`unrelated_mislabel_ids`。每道低匹配样本必须归入一个诊断类别；对于确认存在释义
+`unrelated_mislabel_ids`。每道高匹配样本必须归入有效匹配、释义过宽造成的假阳性
+或模型误判之一；每道低匹配样本也必须归入一个诊断类别。对于确认存在释义
 问题的知识点，结果中的 `definition_issue_evidence_questions` 会附带证据题目的完整
 题干、选项、解析、小题、分数和第一阶段判断理由。先用少量标签验证结果，再去掉
 `--limit` 执行阶段性全量。
