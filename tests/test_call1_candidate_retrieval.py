@@ -32,17 +32,43 @@ def test_load_catalog_returns_exact_paths(tmp_path):
     assert paths == {"知识点@自然地理@标签一", "知识点@人文地理@标签二"}
 
 
-def test_split_catalog_covers_each_label_once():
-    catalog = "\n".join(
-        f"知识点@标签{index}｜释义{index}" for index in range(10)
-    )
+def test_split_catalog_keeps_siblings_together_and_balances_parts():
+    catalog = "\n".join([
+        "知识点@自然地理@水@水循环｜释义0",
+        "知识点@自然地理@水@河流｜释义1",
+        "知识点@自然地理@大气@气候｜释义2",
+        "知识点@自然地理@大气@天气｜释义3",
+        "知识点@人文地理@农业@农业区位｜释义4",
+        "知识点@人文地理@农业@农业类型｜释义5",
+        "知识点@人文地理@工业@工业区位｜释义6",
+        "知识点@人文地理@工业@工业地域｜释义7",
+        "知识点@世界地理@亚洲@东亚｜释义8",
+        "知识点@世界地理@亚洲@东南亚｜释义9",
+        "知识点@世界地理@欧洲@西欧｜释义10",
+        "知识点@世界地理@欧洲@北欧｜释义11",
+    ])
 
     parts = split_catalog(catalog, parts=3)
 
-    assert [len(paths) for _, paths in parts] == [4, 3, 3]
+    assert [len(paths) for _, paths in parts] == [4, 4, 4]
     all_paths = [path for _, paths in parts for path in paths]
-    assert len(all_paths) == len(set(all_paths)) == 10
-    assert set(all_paths) == {f"知识点@标签{index}" for index in range(10)}
+    assert len(all_paths) == len(set(all_paths)) == 12
+
+    part_by_path = {
+        path: part_index
+        for part_index, (_, paths) in enumerate(parts)
+        for path in paths
+    }
+    sibling_pairs = [
+        ("知识点@自然地理@水@水循环", "知识点@自然地理@水@河流"),
+        ("知识点@自然地理@大气@气候", "知识点@自然地理@大气@天气"),
+        ("知识点@人文地理@农业@农业区位", "知识点@人文地理@农业@农业类型"),
+        ("知识点@人文地理@工业@工业区位", "知识点@人文地理@工业@工业地域"),
+        ("知识点@世界地理@亚洲@东亚", "知识点@世界地理@亚洲@东南亚"),
+        ("知识点@世界地理@欧洲@西欧", "知识点@世界地理@欧洲@北欧"),
+    ]
+    for first, second in sibling_pairs:
+        assert part_by_path[first] == part_by_path[second]
 
 
 def test_build_question_text_separates_context_and_excludes_existing_labels():
@@ -218,7 +244,10 @@ def test_validate_result_rejects_invalid_candidates(candidate_labels):
 
 
 def test_trace_records_each_shard_and_resume(monkeypatch, tmp_path):
-    catalog = "\n".join(f"知识点@标签{i}｜释义{i}" for i in range(3))
+    labels = [f"知识点@分类{i}@标签{i}" for i in range(3)]
+    catalog = "\n".join(
+        f"{label}｜释义{index}" for index, label in enumerate(labels)
+    )
     unit = {"parent_id": "q1", "question_id": "q1", "stem": "题目", "sub_questions": []}
     output = tmp_path / "candidates.jsonl"
     trace_output = tmp_path / "trace.jsonl"
@@ -233,7 +262,7 @@ def test_trace_records_each_shard_and_resume(monkeypatch, tmp_path):
 
     monkeypatch.setattr(DeepSeekCandidateRetriever, "request", fake_request)
     arguments = (
-        [unit], catalog, {f"知识点@标签{i}" for i in range(3)},
+        [unit], catalog, set(labels),
         output, "test-model", "http://example.test/v1", None, 1, 1, 10.0, None,
         trace_output,
     )
@@ -247,7 +276,7 @@ def test_trace_records_each_shard_and_resume(monkeypatch, tmp_path):
     traces = [json.loads(line) for line in trace_output.read_text(encoding="utf-8").splitlines()]
     assert len(traces) == 1
     assert traces[0]["shard_candidate_labels"] == [
-        ["知识点@标签0"], ["知识点@标签1"], ["知识点@标签2"]
+        [labels[0]], [labels[1]], [labels[2]]
     ]
     assert traces[0]["before_consolidation"] == traces[0]["candidate_labels"]
     assert traces[0]["consolidation_used"] is False

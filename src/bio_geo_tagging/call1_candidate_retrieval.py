@@ -22,13 +22,15 @@ EXPECTED_LABEL_COUNT = 414
 
 SYSTEM_PROMPT = """你是高中地理知识点候选标签召回器。
 
-你的任务是独立理解当前打标对象，从本批给定的标签中找出所有可能成为最终答案的候选标签。本阶段只追求候选召回，不确定的相邻标签可以同时保留，不做最终取舍。另有其他批次的标签分别处理，你只判断本批标签。
+你的任务是独立理解当前打标对象，从本批给定的标签中找出所有可能成为最终答案的候选标签。本阶段只追求候选召回，不做最终取舍。另有其他批次的标签分别处理，你只判断本批标签。
+
+当多个标签依据各自释义都能合理解释题目的考查内容，而本阶段无法可靠排除其中某个标签时，应将它们都保留为候选，交由下一次调用完成最终判断。这不表示这些标签最终必须同时命中。
 
 判断要求：
 1. 输入为整道题时，公共题干和全部小题共同构成打标对象，需要覆盖各小题知识以及整题综合知识；输入为单个小题时，公共题干只用于理解当前小题。
 2. 结合题干、全部小题、选项、已有答案和解析，判断完成题目实际需要的地理知识。
 3. 错误选项涉及的知识、解析中的延伸知识和一般性背景知识不作为候选。
-4. 只能返回标签目录中存在的完整标签路径，不补充父级、兄弟或层级近邻标签。
+4. 只能返回标签目录中存在的完整标签路径；所有候选都必须有题目信息和标签释义依据，不因父子、兄弟或其他层级关系机械补充标签。
 5. 候选最多20个，不要求凑满。
 
 输出一个JSON对象：
@@ -41,6 +43,8 @@ SYSTEM_PROMPT = """你是高中地理知识点候选标签召回器。
 CONSOLIDATION_PROMPT = """你是高中地理知识点候选标签召回器。
 
 三批标签召回结果已经合并，但候选数量超过20个。请重新根据题目判断，只保留完成当前打标对象可能实际使用的知识点。输入为整道题时需要覆盖全部小题及整题综合知识；输入为单个小题时公共题干只用于理解当前小题。错误选项、背景知识、延伸知识以及仅因主题相近而出现的标签不能保留。
+
+这是候选召回阶段，不是最终打标。多个候选依据各自释义都有合理题目依据且无法可靠排除时，应继续保留；不能仅因为已经保留了更具体、更概括或语义相近的另一个标签，就直接删除当前候选。
 
 只能从下面的候选中选择，最多20个，不要求凑满。输出一个JSON对象：
 {"candidate_labels":["完整标签路径"]}
@@ -93,10 +97,28 @@ def split_catalog(catalog: str, parts: int = 3) -> list[tuple[str, set[str]]]:
     if parts <= 0:
         raise ValueError("标签目录分批数必须大于0")
     lines = catalog.splitlines()
-    chunks = [lines[index::parts] for index in range(parts)]
+    semantic_groups: dict[str, list[tuple[int, str]]] = {}
+    for index, line in enumerate(lines):
+        label_path = line.split("｜", 1)[0].strip()
+        parent_path = label_path.rsplit("@", 1)[0]
+        semantic_groups.setdefault(parent_path, []).append((index, line))
+
+    chunks: list[list[tuple[int, str]]] = [[] for _ in range(parts)]
+    groups = sorted(
+        semantic_groups.values(),
+        key=lambda group: (-len(group), group[0][0]),
+    )
+    for group in groups:
+        target = min(range(parts), key=lambda index: (len(chunks[index]), index))
+        chunks[target].extend(group)
+
+    ordered_chunks = [
+        [line for _, line in sorted(chunk)]
+        for chunk in chunks
+    ]
     return [
         ("\n".join(chunk), {line.split("｜", 1)[0].strip() for line in chunk})
-        for chunk in chunks
+        for chunk in ordered_chunks
     ]
 
 
