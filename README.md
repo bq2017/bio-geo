@@ -173,13 +173,16 @@ PYTHONPATH=src python -m bio_geo_tagging.label_match_analysis \
   --definitions-jsonl data/taxonomy/geography-existing-definitions.jsonl \
   --statistics-json runs/analysis/geography-label-statistics-40pct.json \
   --anomalies-jsonl runs/analysis/geography-label-anomalies-40pct.jsonl \
+  --review-samples-jsonl runs/analysis/geography-label-review-samples-40pct.jsonl \
   --report-md runs/reports/geography-label-analysis-40pct.md \
   --scope-label "40%阶段性快照"
 ```
 
 ABCD阈值为：A≥0.80、B为0.70～0.79、C为0.40～0.69、D<0.40。
 默认将“至少5条且D级不少于3条、D级占比不低于30%”或“至少3条且全部为
-D级”的知识点列为异常候选。每个候选最多展示3道D级题和2道A/B级对照题。
+D级”的知识点列为异常候选。另为所有已覆盖标签生成待诊断样本，每个标签最多
+包含10道A/B级高匹配题和10道C/D级低匹配题，用于同时检查释义过宽、过窄和
+边界歧义；题量不足时保留全部可用题目。
 
 ## 知识点释义分析
 

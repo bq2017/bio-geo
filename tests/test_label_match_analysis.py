@@ -27,6 +27,7 @@ def test_analyze_builds_anomaly_examples_and_report(tmp_path):
     definitions = tmp_path / "definitions.jsonl"
     statistics = tmp_path / "statistics.json"
     anomalies = tmp_path / "anomalies.jsonl"
+    reviews = tmp_path / "reviews.jsonl"
     report = tmp_path / "report.md"
     label = "知识点@自然地理@行星地球"
     scores = [0.0, 0.1, 0.3, 0.85, 0.95]
@@ -44,6 +45,18 @@ def test_analyze_builds_anomaly_examples_and_report(tmp_path):
                 "status": "completed",
             }
             for index, score in enumerate(scores, 1)
+        ]
+        + [
+            {
+                "question_id": "q6",
+                "knw_label": "知识点@自然地理@地球仪",
+                "label_id": "label-2",
+                "judgement": "scored",
+                "score": 0.95,
+                "match": True,
+                "reason": "直接考查",
+                "status": "completed",
+            }
         ],
     )
     write_jsonl(
@@ -58,7 +71,7 @@ def test_analyze_builds_anomaly_examples_and_report(tmp_path):
                     {"question_id": f"q{index}-1", "stem": "小题", "options": "", "analysis": ""}
                 ],
             }
-            for index in range(1, 6)
+            for index in range(1, 7)
         ],
     )
     write_jsonl(
@@ -73,7 +86,17 @@ def test_analyze_builds_anomaly_examples_and_report(tmp_path):
                     "exam_methods": "考查方式",
                     "distinction": "区分",
                 },
-            }
+            },
+            {
+                "label_id": "label-2",
+                "knw_label": "知识点@自然地理@地球仪",
+                "existing_interpretation": {
+                    "definition": "地球仪定义",
+                    "keywords": "地轴",
+                    "exam_methods": "识图",
+                    "distinction": "区别于地图",
+                },
+            },
         ],
     )
 
@@ -84,19 +107,26 @@ def test_analyze_builds_anomaly_examples_and_report(tmp_path):
         str(statistics),
         str(anomalies),
         str(report),
+        str(reviews),
     )
 
     assert result == {
-        "total_records": 5,
-        "covered_labels": 1,
+        "total_records": 6,
+        "covered_labels": 2,
+        "review_labels": 2,
         "anomaly_labels": 1,
         "missing_question_examples": 0,
     }
     stats = json.loads(statistics.read_text(encoding="utf-8"))
-    assert stats["grade_counts"] == {"A": 2, "B": 0, "C": 0, "D": 3}
+    assert stats["grade_counts"] == {"A": 3, "B": 0, "C": 0, "D": 3}
     anomaly = json.loads(anomalies.read_text(encoding="utf-8"))
     assert [example["question_id"] for example in anomaly["low_score_examples"]] == ["q1", "q2", "q3"]
     assert len(anomaly["high_score_examples"]) == 2
+    review_rows = [json.loads(line) for line in reviews.read_text(encoding="utf-8").splitlines()]
+    assert {review["label_id"] for review in review_rows} == {"label-1", "label-2"}
+    review = next(review for review in review_rows if review["label_id"] == "label-1")
+    assert len(review["low_score_examples"]) == 3
+    assert len(review["high_score_examples"]) == 2
     report_text = report.read_text(encoding="utf-8")
     assert "40%阶段性快照" in report_text
     assert "原定义" in report_text

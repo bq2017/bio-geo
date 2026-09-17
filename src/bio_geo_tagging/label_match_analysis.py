@@ -102,13 +102,14 @@ def analyze(
     statistics_json: str,
     anomalies_jsonl: str,
     report_md: str,
+    review_samples_jsonl: str | None = None,
     scope_label: str = "40%阶段性快照",
     min_samples: int = 5,
     min_d_count: int = 3,
     min_d_rate: float = 0.30,
     all_d_min: int = 3,
-    low_examples: int = 3,
-    high_examples: int = 2,
+    low_examples: int = 10,
+    high_examples: int = 10,
 ) -> dict[str, int]:
     if min_samples < 1 or min_d_count < 1 or all_d_min < 1:
         raise ValueError("样本数阈值必须为正整数")
@@ -144,6 +145,7 @@ def analyze(
         grouped[(label_id, label)].append(enriched)
 
     label_statistics = []
+    review_samples = []
     anomalies = []
     missing_question_examples = 0
     for (label_id, label), records in grouped.items():
@@ -172,11 +174,8 @@ def analyze(
             "anomaly_reason": reason,
         }
         label_statistics.append(statistic)
-        if reason is None:
-            continue
-
         low_records = sorted(
-            (record for record in records if record["grade"] == "D"),
+            (record for record in records if record["grade"] in {"C", "D"}),
             key=lambda record: (record["score"], record["question_id"]),
         )[:low_examples]
         high_records = sorted(
@@ -205,16 +204,30 @@ def analyze(
                 )
             return examples
 
-        anomalies.append(
+        parent_path = label.rsplit("@", 1)[0] if "@" in label else ""
+        adjacent_labels = [
             {
-                **statistic,
-                "existing_interpretation": definitions.get(label, {}),
-                "low_score_examples": make_examples(low_records),
-                "high_score_examples": make_examples(high_records),
+                "knw_label": other_label,
+                "existing_interpretation": interpretation,
             }
-        )
+            for other_label, interpretation in definitions.items()
+            if other_label != label
+            and parent_path
+            and other_label.rsplit("@", 1)[0] == parent_path
+        ]
+        review = {
+            **statistic,
+            "existing_interpretation": definitions.get(label, {}),
+            "adjacent_labels": adjacent_labels,
+            "low_score_examples": make_examples(low_records),
+            "high_score_examples": make_examples(high_records),
+        }
+        review_samples.append(review)
+        if reason is not None:
+            anomalies.append(review)
 
     label_statistics.sort(key=lambda item: (-item["d_rate"], -item["evaluated_count"], item["label_id"]))
+    review_samples.sort(key=lambda item: (-item["evaluated_count"], item["label_id"]))
     anomalies.sort(key=lambda item: (-item["d_rate"], -item["evaluated_count"], item["label_id"]))
     total_records = sum(status_counts.values())
     statistics = {
@@ -226,6 +239,7 @@ def analyze(
         "judgement_counts": dict(judgement_counts),
         "grade_counts": {grade: grade_totals[grade] for grade in GRADE_NAMES},
         "anomaly_label_count": len(anomalies),
+        "review_label_count": len(review_samples),
         "missing_question_examples": missing_question_examples,
         "thresholds": {
             "A": "score >= 0.80",
@@ -251,6 +265,12 @@ def analyze(
     with anomalies_path.open("w", encoding="utf-8") as stream:
         for anomaly in anomalies:
             stream.write(json.dumps(anomaly, ensure_ascii=False) + "\n")
+    if review_samples_jsonl:
+        review_path = Path(review_samples_jsonl)
+        review_path.parent.mkdir(parents=True, exist_ok=True)
+        with review_path.open("w", encoding="utf-8") as stream:
+            for review in review_samples:
+                stream.write(json.dumps(review, ensure_ascii=False) + "\n")
 
     report_path = Path(report_md)
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -261,6 +281,7 @@ def analyze(
     return {
         "total_records": total_records,
         "covered_labels": len(grouped),
+        "review_labels": len(review_samples),
         "anomaly_labels": len(anomalies),
         "missing_question_examples": missing_question_examples,
     }
@@ -414,29 +435,31 @@ def main() -> None:
     parser.add_argument("--definitions-jsonl", required=True)
     parser.add_argument("--statistics-json", required=True)
     parser.add_argument("--anomalies-jsonl", required=True)
+    parser.add_argument("--review-samples-jsonl", required=True)
     parser.add_argument("--report-md", required=True)
     parser.add_argument("--scope-label", default="40%阶段性快照")
     parser.add_argument("--min-samples", type=int, default=5)
     parser.add_argument("--min-d-count", type=int, default=3)
     parser.add_argument("--min-d-rate", type=float, default=0.30)
     parser.add_argument("--all-d-min", type=int, default=3)
-    parser.add_argument("--low-examples", type=int, default=3)
-    parser.add_argument("--high-examples", type=int, default=2)
+    parser.add_argument("--low-examples", type=int, default=10)
+    parser.add_argument("--high-examples", type=int, default=10)
     args = parser.parse_args()
     result = analyze(
-        args.match_jsonl,
-        args.questions_jsonl,
-        args.definitions_jsonl,
-        args.statistics_json,
-        args.anomalies_jsonl,
-        args.report_md,
-        args.scope_label,
-        args.min_samples,
-        args.min_d_count,
-        args.min_d_rate,
-        args.all_d_min,
-        args.low_examples,
-        args.high_examples,
+        match_jsonl=args.match_jsonl,
+        questions_jsonl=args.questions_jsonl,
+        definitions_jsonl=args.definitions_jsonl,
+        statistics_json=args.statistics_json,
+        anomalies_jsonl=args.anomalies_jsonl,
+        report_md=args.report_md,
+        review_samples_jsonl=args.review_samples_jsonl,
+        scope_label=args.scope_label,
+        min_samples=args.min_samples,
+        min_d_count=args.min_d_count,
+        min_d_rate=args.min_d_rate,
+        all_d_min=args.all_d_min,
+        low_examples=args.low_examples,
+        high_examples=args.high_examples,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
