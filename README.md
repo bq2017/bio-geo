@@ -154,6 +154,8 @@ PYTHONPATH=src python -m bio_geo_tagging.call1_candidate_retrieval \
 脚本以“题目ID＋标签路径”为单位读取每个标签的 `high_score_valid_ids`。多标签题
 必须所有原标签都属于 `high_score_valid_ids` 才能进入样本；只确认部分标签的题目
 会被整体排除。汇总中的 `excluded_unvalidated_groups` 记录因此被排除的题目数。
+如果不限定抽样数量，希望输出全部符合条件的题目，使用 `--all-eligible`，并且不要
+同时传入 `--big-questions`。
 
 ## 原标签与原释义匹配评分
 

@@ -268,3 +268,49 @@ def test_sample_groups_requires_every_label_to_be_high_score_valid(tmp_path):
     assert {question["question_id"] for question in sampled} == {"ordinary", "big"}
     assert summary["eligible_groups"] == 2
     assert summary["excluded_unvalidated_groups"] == 1
+
+
+def test_sample_groups_can_write_all_eligible_questions(tmp_path):
+    catalog = tmp_path / "catalog.txt"
+    catalog.write_text(
+        "\n".join(f"知识点@标签{index}｜释义{index}" for index in range(414)) + "\n",
+        encoding="utf-8",
+    )
+    questions = [
+        {
+            "parent_id": str(index),
+            "question_id": str(index),
+            "stem": f"题目{index}",
+            "knw_labels": ["知识点@标签0"],
+            "sub_questions": [],
+        }
+        for index in range(3)
+    ]
+    diagnoses = [{
+        "status": "completed",
+        "knw_label": "知识点@标签0",
+        "high_score_valid_ids": ["0", "2"],
+    }]
+    input_path = tmp_path / "questions.jsonl"
+    diagnosis_path = tmp_path / "diagnosis.jsonl"
+    output_path = tmp_path / "sample.jsonl"
+    summary_path = tmp_path / "summary.json"
+    write_jsonl(input_path, questions)
+    write_jsonl(diagnosis_path, diagnoses)
+
+    summary = sample_groups(
+        input_path,
+        catalog,
+        output_path,
+        summary_path,
+        group_count=100,
+        seed=7,
+        diagnosis_path=diagnosis_path,
+        all_eligible=True,
+    )
+
+    sampled = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    assert [question["question_id"] for question in sampled] == ["0", "2"]
+    assert summary["requested_groups"] == "all_eligible"
+    assert summary["sampled_groups"] == 2
+    assert summary["eligible_groups"] == 2

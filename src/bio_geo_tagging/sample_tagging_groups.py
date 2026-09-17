@@ -185,6 +185,23 @@ def reservoir_sample_group_ids(
     return set(sample), eligible_count
 
 
+def all_eligible_group_ids(connection: sqlite3.Connection) -> set[str]:
+    return {
+        root_id
+        for (root_id,) in connection.execute(
+            """
+            SELECT root_question_id
+            FROM groups
+            WHERE root_count = 1
+              AND has_empty_stem = 0
+              AND has_gold = 1
+              AND has_unmapped = 0
+              AND all_labels_valid = 1
+            """
+        )
+    }
+
+
 def write_sampled_units(
     input_path: Path, output_path: Path, sampled_ids: set[str]
 ) -> tuple[int, int, int]:
@@ -218,7 +235,10 @@ def sample_groups(
     seed: int,
     big_questions: int | None = None,
     diagnosis_path: Path | None = None,
+    all_eligible: bool = False,
 ) -> dict[str, Any]:
+    if all_eligible and big_questions is not None:
+        raise ValueError("all_eligible不能与big_questions同时使用")
     if big_questions is not None and not 0 <= big_questions <= group_count:
         raise ValueError("big_questions必须在0到groups之间")
     _, allowed_paths = load_catalog(catalog_path)
@@ -251,7 +271,10 @@ def sample_groups(
             total_units = profile_groups(
                 connection, input_path, allowed_paths, valid_pairs
             )
-            if big_questions is None:
+            if all_eligible:
+                sampled_ids = all_eligible_group_ids(connection)
+                eligible_groups = len(sampled_ids)
+            elif big_questions is None:
                 sampled_ids, eligible_groups = reservoir_sample_group_ids(
                     connection, group_count, seed
                 )
@@ -297,7 +320,7 @@ def sample_groups(
     )
     summary = {
         "seed": seed,
-        "requested_groups": group_count,
+        "requested_groups": "all_eligible" if all_eligible else group_count,
         "sampled_groups": len(sampled_ids),
         "sampled_ordinary_questions": len(sampled_ids) - sampled_big_questions,
         "sampled_big_questions": sampled_big_questions,
@@ -332,6 +355,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--summary-output", type=Path, required=True)
     parser.add_argument("--groups", type=int, default=1000)
     parser.add_argument("--big-questions", type=int)
+    parser.add_argument("--all-eligible", action="store_true")
     parser.add_argument("--seed", type=int, default=20260916)
     return parser
 
@@ -349,6 +373,7 @@ def main() -> None:
         args.seed,
         args.big_questions,
         args.diagnosis_jsonl,
+        args.all_eligible,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
