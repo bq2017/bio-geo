@@ -57,7 +57,7 @@ SYSTEM_PROMPT = """你是高中地理知识点候选标签召回器。完整标�
 
 每个标签独立判断。已经选择某个标签，不影响其他标签按照自身释义继续判断；不能仅因标签之间存在父子、兄弟或其他层级关系而增加候选。
 
-clear_labels和possible_labels都属于候选标签。只能返回本批目录中存在的完整标签路径，本批所有候选标签去重后最多20个。
+clear_labels和possible_labels都属于候选标签。只能返回本批目录中存在的完整标签路径。不要为了控制数量删除符合明确匹配或可能匹配标准的标签；多批候选合并后会统一收敛为最多20个。
 
 只输出以下JSON对象，不要输出其他内容：
 {"matches":[{"evidence_ids":["E1"],"clear_labels":["完整标签路径"],"possible_labels":["完整标签路径"]}]}
@@ -436,8 +436,6 @@ def normalize_match_result(
             }
         )
 
-    if len(labels) > 20:
-        raise ValueError(f"本批候选标签超过20个：{len(labels)}")
     return labels, normalized_matches
 
 
@@ -477,6 +475,57 @@ def parse_or_recover_result(
         matches.sort()
         logging.warning("DS输出JSON无效，已从返回文本恢复%s个标签", len(matches))
         return {"candidate_labels": [path for _, path in matches]}
+
+
+def parse_or_recover_match_result(
+    content: str,
+    allowed_paths: set[str],
+    known_evidence_ids: set[str],
+) -> dict[str, Any]:
+    try:
+        return parse_json_object(content)
+    except (json.JSONDecodeError, ValueError):
+        recovered_labels: list[tuple[int, str]] = []
+        for path in allowed_paths:
+            positions: list[int] = []
+            for variant in (path, path.removeprefix("知识点@")):
+                for match in re.finditer(re.escape(variant), content):
+                    end = match.end()
+                    if end == len(content) or content[end] in '\"｜,]}\n\r':
+                        positions.append(match.start())
+            if positions:
+                recovered_labels.append((min(positions), path))
+        if not recovered_labels:
+            raise
+
+        recovered_labels.sort()
+        evidence_ids = [
+            evidence_id
+            for evidence_id in sorted(
+                known_evidence_ids,
+                key=lambda value: (
+                    (0, int(value[1:]))
+                    if value[1:].isdigit()
+                    else (1, value)
+                ),
+            )
+            if re.search(rf"(?<![A-Za-z0-9_]){re.escape(evidence_id)}(?![A-Za-z0-9_])", content)
+        ]
+        if not evidence_ids:
+            evidence_ids = sorted(known_evidence_ids)
+        logging.warning(
+            "DS输出JSON无效，已从标签匹配文本恢复%s个候选",
+            len(recovered_labels),
+        )
+        return {
+            "matches": [
+                {
+                    "evidence_ids": evidence_ids,
+                    "clear_labels": [],
+                    "possible_labels": [path for _, path in recovered_labels],
+                }
+            ]
+        }
 
 
 class DeepSeekCandidateRetriever:
@@ -545,7 +594,11 @@ class DeepSeekCandidateRetriever:
         content = self.request(system_prompt, question_text)
         if not content.strip():
             raise ValueError(f"第{shard_number}批DS返回空内容")
-        result = parse_json_object(content)
+        result = parse_or_recover_match_result(
+            content,
+            allowed_paths,
+            {item["evidence_id"] for item in tagging_evidence},
+        )
         return normalize_match_result(
             result,
             allowed_paths,
@@ -699,8 +752,9 @@ def run_retrieval(
 ) -> dict[str, int]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     catalog_parts = split_catalog(catalog)
+    selected_units = units[:limit] if limit is not None else units
     completed = load_completed(output_path)
-    unit_keys = {make_unit_key(unit) for unit in units}
+    unit_keys = {make_unit_key(unit) for unit in selected_units}
     stale_keys = set(completed).difference(unit_keys)
     if stale_keys:
         raise ValueError(f"输出文件含有不属于当前输入的记录：{sorted(stale_keys)}")
@@ -720,9 +774,11 @@ def run_retrieval(
                 "已有候选结果缺少诊断记录，请为本次测试使用新的输出文件："
                 f"{sorted(missing_trace)[:3]}"
             )
-    pending = [unit for unit in units if make_unit_key(unit) not in completed]
-    if limit is not None:
-        pending = pending[:limit]
+    pending = [
+        unit
+        for unit in selected_units
+        if make_unit_key(unit) not in completed
+    ]
 
     endpoints = list(dict.fromkeys(base_urls or [base_url]))
     slots_per_endpoint = concurrency_per_endpoint or concurrency

@@ -12,6 +12,7 @@ from bio_geo_tagging.call1_candidate_retrieval import (
     normalize_match_result,
     normalize_tagging_evidence,
     normalize_shard_result,
+    parse_or_recover_match_result,
     parse_or_recover_result,
     run_retrieval,
     split_catalog,
@@ -246,6 +247,47 @@ def test_normalize_match_result_keeps_clear_possible_and_multiple_evidence():
     ]
 
 
+def test_normalize_match_result_allows_more_than_twenty_shard_candidates():
+    allowed = {f"知识点@标签{i}" for i in range(21)}
+
+    labels, _ = normalize_match_result(
+        {
+            "matches": [
+                {
+                    "evidence_ids": ["E1"],
+                    "clear_labels": sorted(allowed),
+                    "possible_labels": [],
+                }
+            ]
+        },
+        allowed,
+        {"E1"},
+    )
+
+    assert set(labels) == allowed
+
+
+def test_parse_or_recover_match_result_recovers_malformed_json():
+    allowed = {"知识点@自然地理@地球仪", "知识点@自然地理@经纬网"}
+    broken = (
+        '{"matches":[{"evidence_ids":["E2"],'
+        '"clear_labels":["知识点@自然地理@地球仪" '
+        '"知识点@自然地理@经纬网"]'
+    )
+
+    result = parse_or_recover_match_result(broken, allowed, {"E1", "E2"})
+
+    assert result == {
+        "matches": [
+            {
+                "evidence_ids": ["E2"],
+                "clear_labels": [],
+                "possible_labels": ["知识点@自然地理@地球仪", "知识点@自然地理@经纬网"],
+            }
+        ]
+    }
+
+
 def test_parse_or_recover_result_recovers_labels_from_broken_json():
     allowed = {
         "知识点@自然地理@地球仪",
@@ -356,6 +398,50 @@ def test_trace_records_each_shard_and_resume(monkeypatch, tmp_path):
     assert traces[0]["before_consolidation"] == traces[0]["candidate_labels"]
     assert traces[0]["consolidation_used"] is False
     assert traces[0]["uncovered_evidence"] == []
+
+
+def test_limit_is_applied_before_resume_filter(monkeypatch, tmp_path):
+    label = "知识点@自然地理@标签"
+    catalog = f"{label}｜释义"
+    units = [
+        {"parent_id": f"q{i}", "question_id": f"q{i}", "stem": f"题目{i}"}
+        for i in range(3)
+    ]
+    output = tmp_path / "candidates.jsonl"
+    failed_once = False
+
+    def fake_retrieve(self, unit):
+        nonlocal failed_once
+        if unit["question_id"] == "q0" and not failed_once:
+            failed_once = True
+            raise ValueError("模拟首次失败")
+        return [label], {"candidate_labels": [label]}
+
+    monkeypatch.setattr(DeepSeekCandidateRetriever, "retrieve", fake_retrieve)
+    arguments = (
+        units,
+        catalog,
+        {label},
+        output,
+        "test-model",
+        "http://example.test/v1",
+        None,
+        1,
+        1,
+        10.0,
+        2,
+    )
+
+    first = run_retrieval(*arguments)
+    second = run_retrieval(*arguments)
+
+    records = [
+        json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()
+    ]
+    assert first["attempted"] == 2
+    assert first["errors"] == 1
+    assert second["attempted"] == 1
+    assert {record["question_id"] for record in records} == {"q0", "q1"}
 
 
 def test_run_retrieval_shares_work_across_multiple_endpoints(monkeypatch, tmp_path):
