@@ -20,71 +20,52 @@ DEFAULT_MODEL = "DeepSeek-V4-Flash"
 DEFAULT_BASE_URL = "http://172.22.0.35:9204/v1"
 EXPECTED_LABEL_COUNT = 414
 
-REQUIREMENT_PROMPT = """你负责分析高中地理题目的实际考查要求，暂时不要选择知识点标签。
+EVIDENCE_PROMPT = """你负责整理高中地理题目中可用于知识点标签判断的标注依据，暂时不要选择知识点标签。
 
-按照原题中的题目部分依次处理：普通题处理整道题；大题处理整道题整体以及每个小题。公共材料用于理解各小题，只有确实存在跨小题或整题综合考查时，才单列整道题整体要求。
+标注依据应完整保留原题实际涉及的地理内容，而不是只概括完成答案所需的解题步骤。只要原题中的信息可能支持知识点标签判断，就应纳入标注依据。
 
-考查要求必须描述完成答案实际需要进行的地理判断、计算、解释、比较或知识应用。结合题干、选项、答案和解析判断：判断或排除选项实际需要的知识应列入；只出现在干扰项文字中的附带内容、解析延伸知识和一般背景不列入。
+按照题目结构处理：
 
-每项要求使用唯一编号R1、R2……，最多20项。只输出JSON对象：
-{"requirements":[{"requirement_id":"R1","question_part":"小题1","requirement":"完成该部分答案实际需要的地理知识或能力"}]}
+普通题：综合题干、选项、答案、解析和图片描述，整理整道题提供的标注依据。
+
+复合题：
+1. 整理公共题干自身提供的标注依据。
+2. 依次整理每个小题提供的标注依据。处理每个小题时，应结合公共题干，以及当前小题的题干、选项、答案、解析和图片描述。
+3. 整理公共题干与所有小题组成的完整题目共同支持的标注依据。综合完整题目中所有可用于知识点标签判断的信息，整理完整题目共同形成的地理内容。
+
+只出现在错误选项中的附带内容、只用于解析扩展的知识以及与题目主体无关的装饰性信息不作为标注依据。
+
+每项标注依据使用唯一编号E1、E2……，最多20项。只输出JSON对象：
+{"tagging_evidence":[{"evidence_id":"E1","question_part":"公共题干、小题1、整道题或普通题","content":"可用于知识点标签判断的完整题目信息"}]}
 """
 
 SYSTEM_PROMPT = """你是高中地理知识点候选标签召回器。完整标签目录被分成多个批次，其他批次会分别处理，你只判断本批标签。
 
-本阶段的任务是找出所有可能成为本题最终知识点标签的候选标签，不是在本阶段确定最终标签。原题是判断标签的最终依据，考查要求清单用于保证整道题及各小题都得到检查。
+本阶段的任务是找出所有可能成为本题最终知识点标签的候选标签，不是在本阶段确定最终标签。原题是判断标签的最终依据，标注依据清单用于保证普通题、公共题干、各小题和完整复合题都得到检查。
 
-按照以下步骤处理：
+阅读完整原题和标注依据清单。
 
-第一步，阅读完整原题和考查要求清单。
+原题提供完整题目信息；标注依据用于整理题目结构并保证普通题、公共题干、各小题和完整复合题都得到覆盖。判断每个标签时，结合原题的具体内容和相关标注依据进行判断。一个标签可以由一项或多项标注依据共同支持。
 
-普通题需要覆盖整道题；大题需要依次覆盖公共材料和每个小题。检查考查要求清单是否覆盖了题目实际需要完成的判断、计算、分析、解释、比较或知识应用。
+按照以下标准进行判断：
 
-如果原题中存在考查要求清单遗漏的实际考查内容，通过additional_matches补充。
+1. 明确匹配：原题的具体内容和相关标注依据能够充分支持标签释义。列入clear_labels。
 
-第二步，围绕每项考查要求，逐一检查本批标签的完整释义与原题之间的关系。
+2. 可能匹配：原题的具体内容和相关标注依据与标签释义存在实质联系，使该标签存在成为最终标签的可能，但目前不足以确认。列入possible_labels。
 
-判断时结合完整原题，包括公共材料、各小题题干、选项、答案和解析。按照以下标准进行判断：
+3. 不匹配：原题的实际内容和标注依据均不能支持该标签；或者相关内容只出现在错误选项、干扰项或解析扩展中。不列入候选。
 
-1. 明确匹配：原题提供了直接、充分的依据，标签释义明确覆盖题目的实际考查内容。列入clear_labels。
-
-2. 可能匹配：原题为标签提供了实际依据，使其存在成为最终标签的合理可能，但当前阶段还不能确认。列入possible_labels。
-
-3. 不匹配：原题没有为标签提供实际依据，不存在成为本题最终标签的合理可能。不匹配包括以下情况：标签释义与题目实际考查内容无关；标签虽然与原题出现了相同或相近的名称、词语、地点、主题或对象，但没有得到标签释义所要求的内容支持；标签只出现在干扰项或解析扩展内容中。不列入候选。
-
-判断或排除选项实际需要的知识可以作为候选依据。只出现在干扰项文字中的附带内容不作为候选依据。解析中参与答案推导或说明题目实际考查内容的知识可以作为候选依据，仅用于扩展说明的知识不作为候选依据。
-
-第三步，完成逐项判断后，再从整道题整体上检查本批标签。
-
-如果某个标签需要由多个考查要求、多个小题或整道题的整体内容共同支持，应将相关内容合并判断。整道题满足某个综合标签的释义、范围或覆盖要求时，将该标签保留为候选，并写入whole_question_matches。
-
-具体知识标签、区域或对象标签、综合标签以及其他类型标签使用相同的判断标准。它们之间不是互斥关系。不能仅因为已经召回一个更具体、更概括或语义相近的标签，就排除另一个同样得到原题实际支持的标签；也不能仅根据父子、兄弟或其他层级关系机械补充标签。
+每个标签独立判断。已经选择某个标签，不影响其他标签按照自身释义继续判断；不能仅因标签之间存在父子、兄弟或其他层级关系而增加候选。
 
 clear_labels和possible_labels都属于候选标签。只能返回本批目录中存在的完整标签路径，本批所有候选标签去重后最多20个。
 
 只输出以下JSON对象，不要输出其他内容：
-{"matches":[{"requirement_id":"R1","clear_labels":["完整标签路径"],"possible_labels":["完整标签路径"]}],"whole_question_matches":[{"basis":"说明由哪些考查要求、小题或整题内容共同支持","clear_labels":["完整标签路径"],"possible_labels":["完整标签路径"]}],"additional_matches":[{"question_part":"小题1或整道题","requirement":"考查要求清单遗漏的实际考查内容","clear_labels":["完整标签路径"],"possible_labels":["完整标签路径"]}]}
+{"matches":[{"evidence_ids":["E1"],"clear_labels":["完整标签路径"],"possible_labels":["完整标签路径"]}]}
 
-没有整题层面的匹配时，whole_question_matches输出空数组。没有遗漏的考查要求时，additional_matches输出空数组。某项已有考查要求没有匹配标签时，可以不写入matches。不要输出不匹配标签及其排除理由。
+没有候选标签的标注依据可以不写入matches。不要输出不匹配标签及其排除理由。
 
-【考查要求】
-{requirements}
-
-【标签目录】
-{catalog}
-"""
-
-RECOVERY_PROMPT = """你负责对高中地理题目中尚未获得候选标签的考查要求进行一次定向补召回，只判断本批标签。
-
-本阶段仍然是候选召回，不是最终标签筛选。原题是最终依据。
-
-对每项未覆盖要求重新核对本批全部标签：原题提供了直接、充分的依据，标签释义明确覆盖题目实际考查内容时，列入clear_labels；原题为标签提供了实际依据，使其存在成为最终标签的合理可能，但当前阶段还不能确认时，列入possible_labels；原题没有为标签提供实际依据，标签与题目无关或只有名称、词语、地点、主题、对象等表面联系时，不列入候选。不要根据父子、兄弟或其他层级关系机械补充标签。
-
-只能返回本批目录中的完整标签路径，本批所有候选合计最多20个。只输出JSON对象：
-{"matches":[{"requirement_id":"R1","clear_labels":["完整标签路径"],"possible_labels":[]}]}
-
-【尚未覆盖的考查要求】
-{requirements}
+【标注依据】
+{tagging_evidence}
 
 【标签目录】
 {catalog}
@@ -92,12 +73,12 @@ RECOVERY_PROMPT = """你负责对高中地理题目中尚未获得候选标签�
 
 CONSOLIDATION_PROMPT = """你负责将已经召回的高中地理候选标签收敛为20个，不重新生成标签或重新拆解题目。
 
-候选已经标明对应的考查要求、整题依据和匹配类型。优先保留明确匹配标签，再保留可能匹配标签；在可能的情况下保持整道题和各项考查要求都有候选。具体知识标签、区域或对象标签、综合标签以及其他类型标签使用相同的依据标准。不能仅因为标签属于某一种类型，或者已有更具体、更概括或语义相近的标签，就删除另一个有独立题目依据的候选。
+候选已经标明对应的标注依据和匹配类型。优先保留明确匹配标签，再保留可能匹配标签；在可能的情况下保持各项标注依据都有候选。每个候选根据自身依据独立判断，不能仅因为已有更具体、更概括或语义相近的标签，就删除另一个有独立题目依据的候选。
 
 只能从下面的候选中选择，必须恰好保留20个。输出一个JSON对象：
 {"candidate_labels":["完整标签路径"]}
 
-【考查要求与候选对应关系】
+【标注依据与候选对应关系】
 {evidence}
 
 【待收敛候选】
@@ -358,63 +339,52 @@ def normalize_shard_result(result: Any, allowed_paths: set[str]) -> list[str]:
     return labels
 
 
-def normalize_requirements(result: Any) -> list[dict[str, str]]:
+def normalize_tagging_evidence(result: Any) -> list[dict[str, str]]:
     if not isinstance(result, dict):
-        raise ValueError("考查要求输出不是JSON对象")
-    raw_requirements = result.get("requirements")
-    if not isinstance(raw_requirements, list) or not raw_requirements:
-        raise ValueError("requirements必须是非空数组")
-    if len(raw_requirements) > 20:
-        raise ValueError(f"考查要求超过20项：{len(raw_requirements)}")
+        raise ValueError("标注依据输出不是JSON对象")
+    raw_evidence = result.get("tagging_evidence")
+    if not isinstance(raw_evidence, list) or not raw_evidence:
+        raise ValueError("tagging_evidence必须是非空数组")
+    if len(raw_evidence) > 20:
+        raise ValueError(f"标注依据超过20项：{len(raw_evidence)}")
 
-    requirements: list[dict[str, str]] = []
+    evidence: list[dict[str, str]] = []
     seen_ids: set[str] = set()
-    for item in raw_requirements:
+    for item in raw_evidence:
         if not isinstance(item, dict):
-            raise ValueError("requirements中的元素必须是对象")
-        requirement_id = as_text(item.get("requirement_id"))
+            raise ValueError("tagging_evidence中的元素必须是对象")
+        evidence_id = as_text(item.get("evidence_id"))
         question_part = as_text(item.get("question_part"))
-        requirement = as_text(item.get("requirement"))
-        if not requirement_id or not question_part or not requirement:
-            raise ValueError("考查要求缺少requirement_id、question_part或requirement")
-        if requirement_id in seen_ids:
-            raise ValueError(f"考查要求编号重复：{requirement_id}")
-        seen_ids.add(requirement_id)
-        requirements.append(
+        content = as_text(item.get("content"))
+        if not evidence_id or not question_part or not content:
+            raise ValueError("标注依据缺少evidence_id、question_part或content")
+        if evidence_id in seen_ids:
+            raise ValueError(f"标注依据编号重复：{evidence_id}")
+        seen_ids.add(evidence_id)
+        evidence.append(
             {
-                "requirement_id": requirement_id,
+                "evidence_id": evidence_id,
                 "question_part": question_part,
-                "requirement": requirement,
+                "content": content,
             }
         )
-    return requirements
+    return evidence
 
 
 def normalize_match_result(
     result: Any,
     allowed_paths: set[str],
-    known_requirement_ids: set[str],
-    additional_prefix: str,
-    allow_additional: bool,
-) -> tuple[list[str], list[dict[str, Any]], list[dict[str, str]]]:
+    known_evidence_ids: set[str],
+) -> tuple[list[str], list[dict[str, Any]]]:
     if not isinstance(result, dict):
         raise ValueError("标签匹配输出不是JSON对象")
     raw_matches = result.get("matches")
     if not isinstance(raw_matches, list):
         raise ValueError("matches必须是数组")
-    raw_additional = result.get("additional_matches", [])
-    if not isinstance(raw_additional, list):
-        raise ValueError("additional_matches必须是数组")
-    raw_whole_question = result.get("whole_question_matches", [])
-    if not isinstance(raw_whole_question, list):
-        raise ValueError("whole_question_matches必须是数组")
-    if raw_additional and not allow_additional:
-        raise ValueError("定向补召回不能新增考查要求")
 
     labels: list[str] = []
     seen_labels: set[str] = set()
     normalized_matches: list[dict[str, Any]] = []
-    additional_requirements: list[dict[str, str]] = []
 
     def normalize_labels(raw: Any) -> list[str]:
         if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
@@ -439,37 +409,19 @@ def normalize_match_result(
             logging.info("忽略本批目录外候选：%s个", ignored)
         return normalized
 
-    def add_match(item: Any, requirement_id: str) -> None:
-        if not isinstance(item, dict):
-            raise ValueError("matches中的元素必须是对象")
-        clear_labels = normalize_labels(item.get("clear_labels", []))
-        possible_labels = [
-            label
-            for label in normalize_labels(item.get("possible_labels", []))
-            if label not in set(clear_labels)
-        ]
-        normalized_matches.append(
-            {
-                "requirement_id": requirement_id,
-                "clear_labels": clear_labels,
-                "possible_labels": possible_labels,
-            }
-        )
-
     for item in raw_matches:
         if not isinstance(item, dict):
             raise ValueError("matches中的元素必须是对象")
-        requirement_id = as_text(item.get("requirement_id"))
-        if requirement_id not in known_requirement_ids:
-            raise ValueError(f"matches引用未知考查要求：{requirement_id}")
-        add_match(item, requirement_id)
-
-    for item in raw_whole_question:
-        if not isinstance(item, dict):
-            raise ValueError("whole_question_matches中的元素必须是对象")
-        basis = as_text(item.get("basis"))
-        if not basis:
-            raise ValueError("整题匹配缺少basis")
+        raw_evidence_ids = item.get("evidence_ids")
+        if not isinstance(raw_evidence_ids, list) or not raw_evidence_ids:
+            raise ValueError("matches中的evidence_ids必须是非空数组")
+        evidence_ids = [as_text(value) for value in raw_evidence_ids]
+        if any(not value for value in evidence_ids):
+            raise ValueError("evidence_ids包含空编号")
+        evidence_ids = list(dict.fromkeys(evidence_ids))
+        unknown_ids = set(evidence_ids).difference(known_evidence_ids)
+        if unknown_ids:
+            raise ValueError(f"matches引用未知标注依据：{sorted(unknown_ids)}")
         clear_labels = normalize_labels(item.get("clear_labels", []))
         possible_labels = [
             label
@@ -478,34 +430,15 @@ def normalize_match_result(
         ]
         normalized_matches.append(
             {
-                "requirement_id": None,
-                "evidence_scope": "whole_question",
-                "basis": basis,
+                "evidence_ids": evidence_ids,
                 "clear_labels": clear_labels,
                 "possible_labels": possible_labels,
             }
         )
 
-    for index, item in enumerate(raw_additional, start=1):
-        if not isinstance(item, dict):
-            raise ValueError("additional_matches中的元素必须是对象")
-        question_part = as_text(item.get("question_part"))
-        requirement = as_text(item.get("requirement"))
-        if not question_part or not requirement:
-            raise ValueError("补充考查要求缺少question_part或requirement")
-        requirement_id = f"{additional_prefix}{index}"
-        additional_requirements.append(
-            {
-                "requirement_id": requirement_id,
-                "question_part": question_part,
-                "requirement": requirement,
-            }
-        )
-        add_match(item, requirement_id)
-
     if len(labels) > 20:
         raise ValueError(f"本批候选标签超过20个：{len(labels)}")
-    return labels, normalized_matches, additional_requirements
+    return labels, normalized_matches
 
 
 def parse_json_object(content: str) -> dict[str, Any]:
@@ -587,23 +520,26 @@ class DeepSeekCandidateRetriever:
             if chunk.choices
         )
 
-    def extract_requirements(self, question_text: str) -> list[dict[str, str]]:
-        content = self.request(REQUIREMENT_PROMPT, question_text)
+    def extract_tagging_evidence(self, question_text: str) -> list[dict[str, str]]:
+        content = self.request(EVIDENCE_PROMPT, question_text)
         if not content.strip():
-            raise ValueError("考查要求分析返回空内容")
-        return normalize_requirements(parse_json_object(content))
+            raise ValueError("标注依据整理返回空内容")
+        return normalize_tagging_evidence(parse_json_object(content))
 
     def retrieve_from_catalog(
         self,
         question_text: str,
-        requirements: list[dict[str, str]],
+        tagging_evidence: list[dict[str, str]],
         catalog: str,
         allowed_paths: set[str],
         shard_number: int,
-    ) -> tuple[list[str], list[dict[str, Any]], list[dict[str, str]]]:
+    ) -> tuple[list[str], list[dict[str, Any]]]:
         system_prompt = (
             SYSTEM_PROMPT
-            .replace("{requirements}", json.dumps(requirements, ensure_ascii=False))
+            .replace(
+                "{tagging_evidence}",
+                json.dumps(tagging_evidence, ensure_ascii=False),
+            )
             .replace("{catalog}", catalog)
         )
         content = self.request(system_prompt, question_text)
@@ -613,60 +549,21 @@ class DeepSeekCandidateRetriever:
         return normalize_match_result(
             result,
             allowed_paths,
-            {item["requirement_id"] for item in requirements},
-            f"A{shard_number}_",
-            allow_additional=True,
+            {item["evidence_id"] for item in tagging_evidence},
         )
-
-    def recover_uncovered(
-        self,
-        question_text: str,
-        uncovered_requirements: list[dict[str, str]],
-    ) -> tuple[list[str], list[dict[str, Any]], list[list[str]]]:
-        recovered_labels: list[str] = []
-        recovered_matches: list[dict[str, Any]] = []
-        shard_labels: list[list[str]] = []
-        requirement_ids = {
-            item["requirement_id"] for item in uncovered_requirements
-        }
-        rendered_requirements = json.dumps(
-            uncovered_requirements, ensure_ascii=False
-        )
-        for shard_number, (catalog, allowed_paths) in enumerate(
-            self.catalog_parts, start=1
-        ):
-            system_prompt = (
-                RECOVERY_PROMPT
-                .replace("{requirements}", rendered_requirements)
-                .replace("{catalog}", catalog)
-            )
-            content = self.request(system_prompt, question_text)
-            if not content.strip():
-                raise ValueError(f"第{shard_number}批定向补召回返回空内容")
-            labels, matches, _ = normalize_match_result(
-                parse_json_object(content),
-                allowed_paths,
-                requirement_ids,
-                "",
-                allow_additional=False,
-            )
-            shard_labels.append(labels)
-            recovered_labels.extend(labels)
-            recovered_matches.extend(matches)
-        return list(dict.fromkeys(recovered_labels)), recovered_matches, shard_labels
 
     def consolidate(
         self,
         question_text: str,
         candidates: list[str],
-        requirements: list[dict[str, str]],
+        tagging_evidence: list[dict[str, str]],
         label_evidence: dict[str, dict[str, Any]],
     ) -> list[str]:
         candidate_catalog = "\n".join(
             self.catalog_lines[label] for label in candidates
         )
         evidence = {
-            "requirements": requirements,
+            "tagging_evidence": tagging_evidence,
             "candidate_evidence": [
                 {"label": label, **label_evidence[label]}
                 for label in candidates
@@ -688,7 +585,7 @@ class DeepSeekCandidateRetriever:
 
     def retrieve(self, unit: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
         question_text = build_question_text(unit)
-        requirements = self.extract_requirements(question_text)
+        tagging_evidence = self.extract_tagging_evidence(question_text)
         candidates: list[str] = []
         shard_candidates: list[list[str]] = []
         shard_matches: list[list[dict[str, Any]]] = []
@@ -696,50 +593,29 @@ class DeepSeekCandidateRetriever:
         for part_number, (catalog, allowed_paths) in enumerate(
             self.catalog_parts, start=1
         ):
-            labels, matches, additional_requirements = self.retrieve_from_catalog(
+            labels, matches = self.retrieve_from_catalog(
                 question_text,
-                requirements,
+                tagging_evidence,
                 catalog,
                 allowed_paths,
                 part_number,
             )
-            requirements.extend(additional_requirements)
             shard_candidates.append(labels)
             shard_matches.append(matches)
             candidates.extend(labels)
             all_matches.extend(matches)
 
         candidates = list(dict.fromkeys(candidates))
-        covered_requirement_ids = {
-            match["requirement_id"]
+        covered_evidence_ids = {
+            evidence_id
             for match in all_matches
             if match["clear_labels"] or match["possible_labels"]
+            for evidence_id in match["evidence_ids"]
         }
-        uncovered_before_recovery = [
-            requirement
-            for requirement in requirements
-            if requirement["requirement_id"] not in covered_requirement_ids
-        ]
-        recovery_matches: list[dict[str, Any]] = []
-        recovery_shard_candidates: list[list[str]] = []
-        if uncovered_before_recovery:
-            recovered, recovery_matches, recovery_shard_candidates = (
-                self.recover_uncovered(question_text, uncovered_before_recovery)
-            )
-            candidates.extend(
-                label for label in recovered if label not in set(candidates)
-            )
-            all_matches.extend(recovery_matches)
-
-        covered_requirement_ids = {
-            match["requirement_id"]
-            for match in all_matches
-            if match["clear_labels"] or match["possible_labels"]
-        }
-        uncovered_after_recovery = [
-            requirement
-            for requirement in requirements
-            if requirement["requirement_id"] not in covered_requirement_ids
+        uncovered_evidence = [
+            evidence
+            for evidence in tagging_evidence
+            if evidence["evidence_id"] not in covered_evidence_ids
         ]
 
         label_evidence: dict[str, dict[str, Any]] = {}
@@ -753,21 +629,14 @@ class DeepSeekCandidateRetriever:
                         label,
                         {
                             "match_type": match_type,
-                            "requirement_ids": [],
-                            "whole_question_bases": [],
+                            "evidence_ids": [],
                         },
                     )
                     if match_type == "clear":
                         evidence["match_type"] = "clear"
-                    requirement_id = match["requirement_id"]
-                    if (
-                        requirement_id
-                        and requirement_id not in evidence["requirement_ids"]
-                    ):
-                        evidence["requirement_ids"].append(requirement_id)
-                    basis = match.get("basis")
-                    if basis and basis not in evidence["whole_question_bases"]:
-                        evidence["whole_question_bases"].append(basis)
+                    for evidence_id in match["evidence_ids"]:
+                        if evidence_id not in evidence["evidence_ids"]:
+                            evidence["evidence_ids"].append(evidence_id)
 
         before_consolidation = candidates.copy()
         if len(candidates) > 20:
@@ -775,18 +644,14 @@ class DeepSeekCandidateRetriever:
             candidates = self.consolidate(
                 question_text,
                 candidates,
-                requirements,
+                tagging_evidence,
                 label_evidence,
             )
         return candidates, {
-            "requirements": requirements,
+            "tagging_evidence": tagging_evidence,
             "shard_candidate_matches": shard_matches,
             "shard_candidate_labels": shard_candidates,
-            "uncovered_before_recovery": uncovered_before_recovery,
-            "recovery_used": bool(uncovered_before_recovery),
-            "recovery_candidate_matches": recovery_matches,
-            "recovery_shard_candidate_labels": recovery_shard_candidates,
-            "uncovered_after_recovery": uncovered_after_recovery,
+            "uncovered_evidence": uncovered_evidence,
             "candidate_evidence": label_evidence,
             "before_consolidation": before_consolidation,
             "consolidation_used": len(before_consolidation) > 20,

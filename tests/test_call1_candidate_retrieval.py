@@ -4,13 +4,13 @@ import pytest
 
 from bio_geo_tagging.call1_candidate_retrieval import (
     DeepSeekCandidateRetriever,
-    REQUIREMENT_PROMPT,
+    EVIDENCE_PROMPT,
     build_question_text,
     get_input_role,
     load_catalog,
     load_units,
     normalize_match_result,
-    normalize_requirements,
+    normalize_tagging_evidence,
     normalize_shard_result,
     parse_or_recover_result,
     run_retrieval,
@@ -198,101 +198,52 @@ def test_normalize_shard_result_repairs_format_and_deduplicates():
     assert labels == ["知识点@自然地理@地球仪", "知识点@自然地理@经纬网"]
 
 
-def test_normalize_requirements_validates_unique_complete_items():
-    requirements = normalize_requirements(
+def test_normalize_tagging_evidence_validates_unique_complete_items():
+    evidence = normalize_tagging_evidence(
         {
-            "requirements": [
+            "tagging_evidence": [
                 {
-                    "requirement_id": "R1",
-                    "question_part": "小题1",
-                    "requirement": "判断河流补给类型",
+                    "evidence_id": "E1",
+                    "question_part": "公共题干",
+                    "content": "整道题以洞庭湖变化为研究内容",
                 },
                 {
-                    "requirement_id": "R2",
+                    "evidence_id": "E2",
                     "question_part": "小题2",
-                    "requirement": "分析径流季节变化",
+                    "content": "分析湖泊面积变化原因",
                 },
             ]
         }
     )
 
-    assert [item["requirement_id"] for item in requirements] == ["R1", "R2"]
+    assert [item["evidence_id"] for item in evidence] == ["E1", "E2"]
 
 
-def test_normalize_match_result_keeps_clear_possible_and_additional_matches():
-    allowed = {"知识点@标签一", "知识点@标签二", "知识点@标签三"}
+def test_normalize_match_result_keeps_clear_possible_and_multiple_evidence():
+    allowed = {"知识点@标签一", "知识点@标签二"}
 
-    labels, matches, additional = normalize_match_result(
+    labels, matches = normalize_match_result(
         {
             "matches": [
                 {
-                    "requirement_id": "R1",
+                    "evidence_ids": ["E1", "E2"],
                     "clear_labels": ["知识点@标签一"],
                     "possible_labels": ["知识点@标签二"],
                 }
             ],
-            "additional_matches": [
-                {
-                    "question_part": "小题2",
-                    "requirement": "补充要求",
-                    "clear_labels": ["知识点@标签三"],
-                    "possible_labels": [],
-                }
-            ],
         },
         allowed,
-        {"R1"},
-        "A1_",
-        allow_additional=True,
+        {"E1", "E2"},
     )
 
-    assert labels == ["知识点@标签一", "知识点@标签二", "知识点@标签三"]
-    assert matches[1]["requirement_id"] == "A1_1"
-    assert additional == [
+    assert labels == ["知识点@标签一", "知识点@标签二"]
+    assert matches == [
         {
-            "requirement_id": "A1_1",
-            "question_part": "小题2",
-            "requirement": "补充要求",
+            "evidence_ids": ["E1", "E2"],
+            "clear_labels": ["知识点@标签一"],
+            "possible_labels": ["知识点@标签二"],
         }
     ]
-
-
-def test_normalize_match_result_keeps_whole_question_matches():
-    allowed = {"知识点@具体标签", "知识点@综合标签"}
-
-    labels, matches, additional = normalize_match_result(
-        {
-            "matches": [
-                {
-                    "requirement_id": "R1",
-                    "clear_labels": ["知识点@具体标签"],
-                    "possible_labels": [],
-                }
-            ],
-            "whole_question_matches": [
-                {
-                    "basis": "小题1和小题2共同形成综合考查",
-                    "clear_labels": [],
-                    "possible_labels": ["知识点@综合标签"],
-                }
-            ],
-            "additional_matches": [],
-        },
-        allowed,
-        {"R1"},
-        "A1_",
-        allow_additional=True,
-    )
-
-    assert labels == ["知识点@具体标签", "知识点@综合标签"]
-    assert matches[1] == {
-        "requirement_id": None,
-        "evidence_scope": "whole_question",
-        "basis": "小题1和小题2共同形成综合考查",
-        "clear_labels": [],
-        "possible_labels": ["知识点@综合标签"],
-    }
-    assert additional == []
 
 
 def test_parse_or_recover_result_recovers_labels_from_broken_json():
@@ -353,14 +304,14 @@ def test_trace_records_each_shard_and_resume(monkeypatch, tmp_path):
     trace_output = tmp_path / "trace.jsonl"
 
     def fake_request(self, system_prompt, question_text):
-        if system_prompt == REQUIREMENT_PROMPT:
+        if system_prompt == EVIDENCE_PROMPT:
             return json.dumps(
                 {
-                    "requirements": [
+                    "tagging_evidence": [
                         {
-                            "requirement_id": "R1",
-                            "question_part": "题目",
-                            "requirement": "完成题目",
+                            "evidence_id": "E1",
+                            "question_part": "普通题",
+                            "content": "题目提供的标注依据",
                         }
                     ]
                 },
@@ -375,12 +326,11 @@ def test_trace_records_each_shard_and_resume(monkeypatch, tmp_path):
             {
                 "matches": [
                     {
-                        "requirement_id": "R1",
+                        "evidence_ids": ["E1"],
                         "clear_labels": [label],
                         "possible_labels": [],
                     }
                 ],
-                "additional_matches": [],
             },
             ensure_ascii=False,
         )
@@ -405,8 +355,7 @@ def test_trace_records_each_shard_and_resume(monkeypatch, tmp_path):
     ]
     assert traces[0]["before_consolidation"] == traces[0]["candidate_labels"]
     assert traces[0]["consolidation_used"] is False
-    assert traces[0]["recovery_used"] is False
-    assert traces[0]["uncovered_after_recovery"] == []
+    assert traces[0]["uncovered_evidence"] == []
 
 
 def test_run_retrieval_shares_work_across_multiple_endpoints(monkeypatch, tmp_path):
@@ -425,15 +374,15 @@ def test_run_retrieval_shares_work_across_multiple_endpoints(monkeypatch, tmp_pa
     barrier = threading.Barrier(2)
 
     def fake_request(self, system_prompt, question_text):
-        if system_prompt == REQUIREMENT_PROMPT:
+        if system_prompt == EVIDENCE_PROMPT:
             barrier.wait(timeout=2)
             return json.dumps(
                 {
-                    "requirements": [
+                    "tagging_evidence": [
                         {
-                            "requirement_id": "R1",
-                            "question_part": "题目",
-                            "requirement": "完成题目",
+                            "evidence_id": "E1",
+                            "question_part": "普通题",
+                            "content": "题目提供的标注依据",
                         }
                     ]
                 },
@@ -448,13 +397,11 @@ def test_run_retrieval_shares_work_across_multiple_endpoints(monkeypatch, tmp_pa
             {
                 "matches": [
                     {
-                        "requirement_id": "R1",
+                        "evidence_ids": ["E1"],
                         "clear_labels": [label],
                         "possible_labels": [],
                     }
                 ],
-                "whole_question_matches": [],
-                "additional_matches": [],
             },
             ensure_ascii=False,
         )
@@ -484,7 +431,7 @@ def test_run_retrieval_shares_work_across_multiple_endpoints(monkeypatch, tmp_pa
     assert {record["endpoint"] for record in records} == set(endpoints)
 
 
-def test_retrieve_only_recovers_requirements_left_uncovered(monkeypatch):
+def test_retrieve_records_uncovered_evidence_without_recovery(monkeypatch):
     labels = [f"知识点@分类{i}@标签{i}" for i in range(3)]
     catalog_parts = [
         (f"{label}｜释义{i}", {label}) for i, label in enumerate(labels)
@@ -497,20 +444,24 @@ def test_retrieve_only_recovers_requirements_left_uncovered(monkeypatch):
         10.0,
     )
 
+    request_count = 0
+
     def fake_request(self, system_prompt, question_text):
-        if system_prompt == REQUIREMENT_PROMPT:
+        nonlocal request_count
+        request_count += 1
+        if system_prompt == EVIDENCE_PROMPT:
             return json.dumps(
                 {
-                    "requirements": [
+                    "tagging_evidence": [
                         {
-                            "requirement_id": "R1",
+                            "evidence_id": "E1",
                             "question_part": "小题1",
-                            "requirement": "要求一",
+                            "content": "依据一",
                         },
                         {
-                            "requirement_id": "R2",
+                            "evidence_id": "E2",
                             "question_part": "小题2",
-                            "requirement": "要求二",
+                            "content": "依据二",
                         },
                     ]
                 },
@@ -521,30 +472,16 @@ def test_retrieve_only_recovers_requirements_left_uncovered(monkeypatch):
             for line in system_prompt.splitlines()
             if line.startswith("知识点@")
         )
-        if "定向补召回" in system_prompt:
-            matches = []
-            if label == labels[2]:
-                matches = [
-                    {
-                        "requirement_id": "R2",
-                        "clear_labels": [],
-                        "possible_labels": [label],
-                    }
-                ]
-            return json.dumps({"matches": matches}, ensure_ascii=False)
         matches = []
         if label == labels[0]:
             matches = [
                 {
-                    "requirement_id": "R1",
+                    "evidence_ids": ["E1"],
                     "clear_labels": [label],
                     "possible_labels": [],
                 }
             ]
-        return json.dumps(
-            {"matches": matches, "additional_matches": []},
-            ensure_ascii=False,
-        )
+        return json.dumps({"matches": matches}, ensure_ascii=False)
 
     monkeypatch.setattr(DeepSeekCandidateRetriever, "request", fake_request)
 
@@ -552,11 +489,11 @@ def test_retrieve_only_recovers_requirements_left_uncovered(monkeypatch):
         {"question_id": "q1", "stem": "题目", "sub_questions": []}
     )
 
-    assert candidates == [labels[0], labels[2]]
-    assert trace["recovery_used"] is True
-    assert [item["requirement_id"] for item in trace["uncovered_before_recovery"]] == ["R2"]
-    assert trace["uncovered_after_recovery"] == []
-    assert trace["recovery_shard_candidate_labels"] == [[], [], [labels[2]]]
+    assert candidates == [labels[0]]
+    assert [item["evidence_id"] for item in trace["uncovered_evidence"]] == [
+        "E2"
+    ]
+    assert request_count == 4
 
 
 def test_consolidation_requires_exactly_twenty_labels(monkeypatch):
@@ -569,11 +506,11 @@ def test_consolidation_requires_exactly_twenty_labels(monkeypatch):
         None,
         10.0,
     )
-    requirements = [
-        {"requirement_id": "R1", "question_part": "题目", "requirement": "要求"}
+    tagging_evidence = [
+        {"evidence_id": "E1", "question_part": "普通题", "content": "依据"}
     ]
     evidence = {
-        label: {"match_type": "clear", "requirement_ids": ["R1"]}
+        label: {"match_type": "clear", "evidence_ids": ["E1"]}
         for label in labels
     }
 
@@ -585,7 +522,7 @@ def test_consolidation_requires_exactly_twenty_labels(monkeypatch):
         ),
     )
     with pytest.raises(ValueError, match="必须恰好20个"):
-        retriever.consolidate("题目", labels, requirements, evidence)
+        retriever.consolidate("题目", labels, tagging_evidence, evidence)
 
     monkeypatch.setattr(
         DeepSeekCandidateRetriever,
@@ -594,4 +531,4 @@ def test_consolidation_requires_exactly_twenty_labels(monkeypatch):
             {"candidate_labels": labels[:20]}, ensure_ascii=False
         ),
     )
-    assert retriever.consolidate("题目", labels, requirements, evidence) == labels[:20]
+    assert retriever.consolidate("题目", labels, tagging_evidence, evidence) == labels[:20]
