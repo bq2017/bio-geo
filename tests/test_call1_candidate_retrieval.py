@@ -257,6 +257,44 @@ def test_normalize_match_result_keeps_clear_possible_and_additional_matches():
     ]
 
 
+def test_normalize_match_result_keeps_whole_question_matches():
+    allowed = {"知识点@具体标签", "知识点@综合标签"}
+
+    labels, matches, additional = normalize_match_result(
+        {
+            "matches": [
+                {
+                    "requirement_id": "R1",
+                    "clear_labels": ["知识点@具体标签"],
+                    "possible_labels": [],
+                }
+            ],
+            "whole_question_matches": [
+                {
+                    "basis": "小题1和小题2共同形成综合考查",
+                    "clear_labels": [],
+                    "possible_labels": ["知识点@综合标签"],
+                }
+            ],
+            "additional_matches": [],
+        },
+        allowed,
+        {"R1"},
+        "A1_",
+        allow_additional=True,
+    )
+
+    assert labels == ["知识点@具体标签", "知识点@综合标签"]
+    assert matches[1] == {
+        "requirement_id": None,
+        "evidence_scope": "whole_question",
+        "basis": "小题1和小题2共同形成综合考查",
+        "clear_labels": [],
+        "possible_labels": ["知识点@综合标签"],
+    }
+    assert additional == []
+
+
 def test_parse_or_recover_result_recovers_labels_from_broken_json():
     allowed = {
         "知识点@自然地理@地球仪",

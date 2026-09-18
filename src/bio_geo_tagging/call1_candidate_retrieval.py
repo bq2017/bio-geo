@@ -30,24 +30,42 @@ REQUIREMENT_PROMPT = """你负责分析高中地理题目的实际考查要求�
 {"requirements":[{"requirement_id":"R1","question_part":"小题1","requirement":"完成该部分答案实际需要的地理知识或能力"}]}
 """
 
-SYSTEM_PROMPT = """你是高中地理知识点候选标签召回器。另有其他标签批次分别处理，你只判断本批标签。
+SYSTEM_PROMPT = """你是高中地理知识点候选标签召回器。完整标签目录被分成多个批次，其他批次会分别处理，你只判断本批标签。
 
-原题是最终依据。下面的考查要求清单用于保证整题和各小题得到覆盖；如果原题中还有清单遗漏的实际考查要求，可以通过additional_matches补充。
+本阶段的任务是找出所有可能成为本题最终知识点标签的候选标签，不是在本阶段确定最终标签。原题是判断标签的最终依据，考查要求清单用于保证整道题及各小题都得到检查。
 
-对标签采用以下统一标准：
-1. 明确匹配：标签定义直接对应完成某项考查要求所需的判断、计算、解释或知识应用，必须保留。
-2. 可能匹配：标签与某项考查要求存在实质对应，但当前阶段无法可靠排除，保留给下一次调用判断。
-3. 主题相关：只与材料主题、地点、对象或关键词相关，没有参与答案形成，不保留。
-4. 明确无关：与考查要求不对应，或仅因父子、兄弟和其他层级关系被联想到，不保留。
+按照以下步骤处理：
 
-判断或排除选项实际需要的知识可以保留；只出现在干扰项文字中的附带内容不保留。解析中参与答案推导的知识可以保留；仅用于扩展说明的知识不保留。
+第一步，阅读完整原题和考查要求清单。
 
-每个候选必须对应一项考查要求。分别列出明确匹配和可能匹配标签；两类都属于候选。不输出主题相关和明确无关标签。只能返回本批目录中的完整标签路径，本批所有候选合计最多20个。
+普通题需要覆盖整道题；大题需要依次覆盖公共材料和每个小题。检查考查要求清单是否覆盖了题目实际需要完成的判断、计算、分析、解释、比较或知识应用。
 
-只输出JSON对象：
-{"matches":[{"requirement_id":"R1","clear_labels":["完整标签路径"],"possible_labels":[]}],"additional_matches":[{"question_part":"小题1","requirement":"清单遗漏的实际考查要求","clear_labels":["完整标签路径"],"possible_labels":[]}]}
+如果原题中存在考查要求清单遗漏的实际考查内容，通过additional_matches补充。
 
-没有补充要求时additional_matches输出空数组。没有匹配标签的已有要求可以不写入matches。
+第二步，围绕每项考查要求，逐一检查本批标签的完整释义与原题之间的关系。
+
+判断时结合完整原题，包括公共材料、各小题题干、选项、答案和解析。按照以下标准进行判断：
+
+1. 明确匹配：原题提供了直接、充分的依据，标签释义明确覆盖题目的实际考查内容。列入clear_labels。
+
+2. 可能匹配：原题为标签提供了实际依据，使其存在成为最终标签的合理可能，但当前阶段还不能确认。列入possible_labels。
+
+3. 不匹配：原题没有为标签提供实际依据，不存在成为本题最终标签的合理可能。不匹配包括以下情况：标签释义与题目实际考查内容无关；标签虽然与原题出现了相同或相近的名称、词语、地点、主题或对象，但没有得到标签释义所要求的内容支持；标签只出现在干扰项或解析扩展内容中。不列入候选。
+
+判断或排除选项实际需要的知识可以作为候选依据。只出现在干扰项文字中的附带内容不作为候选依据。解析中参与答案推导或说明题目实际考查内容的知识可以作为候选依据，仅用于扩展说明的知识不作为候选依据。
+
+第三步，完成逐项判断后，再从整道题整体上检查本批标签。
+
+如果某个标签需要由多个考查要求、多个小题或整道题的整体内容共同支持，应将相关内容合并判断。整道题满足某个综合标签的释义、范围或覆盖要求时，将该标签保留为候选，并写入whole_question_matches。
+
+具体知识标签、区域或对象标签、综合标签以及其他类型标签使用相同的判断标准。它们之间不是互斥关系。不能仅因为已经召回一个更具体、更概括或语义相近的标签，就排除另一个同样得到原题实际支持的标签；也不能仅根据父子、兄弟或其他层级关系机械补充标签。
+
+clear_labels和possible_labels都属于候选标签。只能返回本批目录中存在的完整标签路径，本批所有候选标签去重后最多20个。
+
+只输出以下JSON对象，不要输出其他内容：
+{"matches":[{"requirement_id":"R1","clear_labels":["完整标签路径"],"possible_labels":["完整标签路径"]}],"whole_question_matches":[{"basis":"说明由哪些考查要求、小题或整题内容共同支持","clear_labels":["完整标签路径"],"possible_labels":["完整标签路径"]}],"additional_matches":[{"question_part":"小题1或整道题","requirement":"考查要求清单遗漏的实际考查内容","clear_labels":["完整标签路径"],"possible_labels":["完整标签路径"]}]}
+
+没有整题层面的匹配时，whole_question_matches输出空数组。没有遗漏的考查要求时，additional_matches输出空数组。某项已有考查要求没有匹配标签时，可以不写入matches。不要输出不匹配标签及其排除理由。
 
 【考查要求】
 {requirements}
@@ -58,7 +76,9 @@ SYSTEM_PROMPT = """你是高中地理知识点候选标签召回器。另有其�
 
 RECOVERY_PROMPT = """你负责对高中地理题目中尚未获得候选标签的考查要求进行一次定向补召回，只判断本批标签。
 
-原题是最终依据。对每项未覆盖要求重新核对本批全部标签：标签定义直接对应要求时列入clear_labels；存在实质对应但无法可靠排除时列入possible_labels。只与主题、地点、对象或关键词相关的标签不保留，不根据标签层级机械补充。
+本阶段仍然是候选召回，不是最终标签筛选。原题是最终依据。
+
+对每项未覆盖要求重新核对本批全部标签：原题提供了直接、充分的依据，标签释义明确覆盖题目实际考查内容时，列入clear_labels；原题为标签提供了实际依据，使其存在成为最终标签的合理可能，但当前阶段还不能确认时，列入possible_labels；原题没有为标签提供实际依据，标签与题目无关或只有名称、词语、地点、主题、对象等表面联系时，不列入候选。不要根据父子、兄弟或其他层级关系机械补充标签。
 
 只能返回本批目录中的完整标签路径，本批所有候选合计最多20个。只输出JSON对象：
 {"matches":[{"requirement_id":"R1","clear_labels":["完整标签路径"],"possible_labels":[]}]}
@@ -72,7 +92,7 @@ RECOVERY_PROMPT = """你负责对高中地理题目中尚未获得候选标签�
 
 CONSOLIDATION_PROMPT = """你负责将已经召回的高中地理候选标签收敛为20个，不重新生成标签或重新拆解题目。
 
-候选已经标明对应的考查要求和匹配类型。优先保留明确匹配标签，再保留可能匹配标签；在可能的情况下保持各项考查要求都有候选，不能仅因为已有更具体、更概括或语义相近的标签就删除另一个有独立依据的候选。
+候选已经标明对应的考查要求、整题依据和匹配类型。优先保留明确匹配标签，再保留可能匹配标签；在可能的情况下保持整道题和各项考查要求都有候选。具体知识标签、区域或对象标签、综合标签以及其他类型标签使用相同的依据标准。不能仅因为标签属于某一种类型，或者已有更具体、更概括或语义相近的标签，就删除另一个有独立题目依据的候选。
 
 只能从下面的候选中选择，必须恰好保留20个。输出一个JSON对象：
 {"candidate_labels":["完整标签路径"]}
@@ -385,6 +405,9 @@ def normalize_match_result(
     raw_additional = result.get("additional_matches", [])
     if not isinstance(raw_additional, list):
         raise ValueError("additional_matches必须是数组")
+    raw_whole_question = result.get("whole_question_matches", [])
+    if not isinstance(raw_whole_question, list):
+        raise ValueError("whole_question_matches必须是数组")
     if raw_additional and not allow_additional:
         raise ValueError("定向补召回不能新增考查要求")
 
@@ -440,6 +463,28 @@ def normalize_match_result(
         if requirement_id not in known_requirement_ids:
             raise ValueError(f"matches引用未知考查要求：{requirement_id}")
         add_match(item, requirement_id)
+
+    for item in raw_whole_question:
+        if not isinstance(item, dict):
+            raise ValueError("whole_question_matches中的元素必须是对象")
+        basis = as_text(item.get("basis"))
+        if not basis:
+            raise ValueError("整题匹配缺少basis")
+        clear_labels = normalize_labels(item.get("clear_labels", []))
+        possible_labels = [
+            label
+            for label in normalize_labels(item.get("possible_labels", []))
+            if label not in set(clear_labels)
+        ]
+        normalized_matches.append(
+            {
+                "requirement_id": None,
+                "evidence_scope": "whole_question",
+                "basis": basis,
+                "clear_labels": clear_labels,
+                "possible_labels": possible_labels,
+            }
+        )
 
     for index, item in enumerate(raw_additional, start=1):
         if not isinstance(item, dict):
@@ -705,12 +750,23 @@ class DeepSeekCandidateRetriever:
                 for label in match[field]:
                     evidence = label_evidence.setdefault(
                         label,
-                        {"match_type": match_type, "requirement_ids": []},
+                        {
+                            "match_type": match_type,
+                            "requirement_ids": [],
+                            "whole_question_bases": [],
+                        },
                     )
                     if match_type == "clear":
                         evidence["match_type"] = "clear"
-                    if match["requirement_id"] not in evidence["requirement_ids"]:
-                        evidence["requirement_ids"].append(match["requirement_id"])
+                    requirement_id = match["requirement_id"]
+                    if (
+                        requirement_id
+                        and requirement_id not in evidence["requirement_ids"]
+                    ):
+                        evidence["requirement_ids"].append(requirement_id)
+                    basis = match.get("basis")
+                    if basis and basis not in evidence["whole_question_bases"]:
+                        evidence["whole_question_bases"].append(basis)
 
         before_consolidation = candidates.copy()
         if len(candidates) > 20:
