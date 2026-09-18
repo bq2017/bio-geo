@@ -9,7 +9,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from threading import Lock
+from queue import Queue
 from typing import Any
 
 from openai import OpenAI
@@ -561,6 +561,7 @@ class DeepSeekCandidateRetriever:
             timeout=timeout,
             max_retries=1,
         )
+        self.base_url = base_url
         self.catalog_parts = catalog_parts
         self.catalog_lines = {
             line.split("｜", 1)[0].strip(): line
@@ -828,6 +829,8 @@ def run_retrieval(
     timeout: float,
     limit: int | None,
     trace_output: Path | None = None,
+    base_urls: list[str] | None = None,
+    concurrency_per_endpoint: int | None = None,
 ) -> dict[str, int]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     catalog_parts = split_catalog(catalog)
@@ -856,58 +859,63 @@ def run_retrieval(
     if limit is not None:
         pending = pending[:limit]
 
-    thread_local_retrievers: dict[int, DeepSeekCandidateRetriever] = {}
-    retriever_lock = Lock()
-
-    def get_retriever() -> DeepSeekCandidateRetriever:
-        import threading
-
-        thread_id = threading.get_ident()
-        with retriever_lock:
-            if thread_id not in thread_local_retrievers:
-                thread_local_retrievers[thread_id] = DeepSeekCandidateRetriever(
+    endpoints = list(dict.fromkeys(base_urls or [base_url]))
+    slots_per_endpoint = concurrency_per_endpoint or concurrency
+    retriever_pool: Queue[DeepSeekCandidateRetriever] = Queue()
+    for endpoint in endpoints:
+        for _ in range(slots_per_endpoint):
+            retriever_pool.put(
+                DeepSeekCandidateRetriever(
                     catalog_parts,
                     model,
-                    base_url,
+                    endpoint,
                     api_key,
                     timeout,
                 )
-            return thread_local_retrievers[thread_id]
+            )
 
     def process(unit: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         unit_key = make_unit_key(unit)
-        last_error: Exception | None = None
-        for attempt in range(1, retries + 1):
-            try:
-                candidate_labels, trace = get_retriever().retrieve(unit)
-                record = {
-                    "unit_key": unit_key,
-                    "question_id": as_text(unit.get("question_id")),
-                    "root_question_id": as_text(
-                        unit.get("root_question_id")
-                        or unit.get("parent_id")
-                        or unit.get("question_id")
-                    ),
-                    "input_role": get_input_role(unit),
-                    "candidate_labels": candidate_labels,
-                    "uncovered_topic": None,
-                    "model": model,
-                    "endpoint": base_url,
-                    "status": "completed",
-                }
-                return record, {"unit_key": unit_key, **trace}
-            except Exception as error:
-                last_error = error
-                logging.warning(
-                    "题目 %s 第 %s 次调用失败：%s", unit_key, attempt, error
-                )
-        raise RuntimeError(f"题目{unit_key}调用失败") from last_error
+        retriever = retriever_pool.get()
+        try:
+            last_error: Exception | None = None
+            for attempt in range(1, retries + 1):
+                try:
+                    candidate_labels, trace = retriever.retrieve(unit)
+                    record = {
+                        "unit_key": unit_key,
+                        "question_id": as_text(unit.get("question_id")),
+                        "root_question_id": as_text(
+                            unit.get("root_question_id")
+                            or unit.get("parent_id")
+                            or unit.get("question_id")
+                        ),
+                        "input_role": get_input_role(unit),
+                        "candidate_labels": candidate_labels,
+                        "uncovered_topic": None,
+                        "model": model,
+                        "endpoint": retriever.base_url,
+                        "status": "completed",
+                    }
+                    return record, {"unit_key": unit_key, **trace}
+                except Exception as error:
+                    last_error = error
+                    logging.warning(
+                        "题目 %s 在 %s 第 %s 次调用失败：%s",
+                        unit_key,
+                        retriever.base_url,
+                        attempt,
+                        error,
+                    )
+            raise RuntimeError(f"题目{unit_key}调用失败") from last_error
+        finally:
+            retriever_pool.put(retriever)
 
     errors = 0
     with (
         output_path.open("a", encoding="utf-8") as output_stream,
         (trace_output.open("a", encoding="utf-8") if trace_output else open(os.devnull, "w")) as trace_stream,
-        ThreadPoolExecutor(max_workers=concurrency) as executor,
+        ThreadPoolExecutor(max_workers=len(endpoints) * slots_per_endpoint) as executor,
         tqdm(total=len(pending), desc="Retrieving candidates") as progress,
     ):
         futures = {executor.submit(process, unit): unit for unit in pending}
@@ -948,10 +956,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trace-output", type=Path)
     parser.add_argument("--log-file", type=Path, required=True)
     parser.add_argument("--model", default=os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL))
-    parser.add_argument(
+    endpoint_group = parser.add_mutually_exclusive_group()
+    endpoint_group.add_argument(
         "--base-url", default=os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL)
     )
+    endpoint_group.add_argument("--base-urls", nargs="+")
     parser.add_argument("--concurrency", type=int, default=10)
+    parser.add_argument("--concurrency-per-endpoint", type=int, default=5)
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--limit", type=int)
@@ -960,8 +971,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    if args.concurrency <= 0 or args.retries <= 0 or args.timeout <= 0:
-        raise SystemExit("concurrency、retries和timeout必须大于0")
+    if (
+        args.concurrency <= 0
+        or args.concurrency_per_endpoint <= 0
+        or args.retries <= 0
+        or args.timeout <= 0
+    ):
+        raise SystemExit(
+            "concurrency、concurrency-per-endpoint、retries和timeout必须大于0"
+        )
     if args.limit is not None and args.limit <= 0:
         raise SystemExit("limit必须大于0")
 
@@ -988,6 +1006,8 @@ def main() -> None:
         args.timeout,
         args.limit,
         args.trace_output,
+        args.base_urls,
+        args.concurrency_per_endpoint if args.base_urls else None,
     )
     summary["skipped_empty_stem"] = skipped_empty_stem
     print(json.dumps(summary, ensure_ascii=False, indent=2))

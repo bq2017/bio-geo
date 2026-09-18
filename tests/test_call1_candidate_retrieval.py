@@ -409,6 +409,81 @@ def test_trace_records_each_shard_and_resume(monkeypatch, tmp_path):
     assert traces[0]["uncovered_after_recovery"] == []
 
 
+def test_run_retrieval_shares_work_across_multiple_endpoints(monkeypatch, tmp_path):
+    import threading
+
+    labels = [f"知识点@分类{i}@标签{i}" for i in range(3)]
+    catalog = "\n".join(
+        f"{label}｜释义{index}" for index, label in enumerate(labels)
+    )
+    units = [
+        {"parent_id": f"q{i}", "question_id": f"q{i}", "stem": f"题目{i}"}
+        for i in range(4)
+    ]
+    endpoints = ["http://endpoint-1/v1", "http://endpoint-2/v1"]
+    output = tmp_path / "candidates.jsonl"
+    barrier = threading.Barrier(2)
+
+    def fake_request(self, system_prompt, question_text):
+        if system_prompt == REQUIREMENT_PROMPT:
+            barrier.wait(timeout=2)
+            return json.dumps(
+                {
+                    "requirements": [
+                        {
+                            "requirement_id": "R1",
+                            "question_part": "题目",
+                            "requirement": "完成题目",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        label = next(
+            line.split("｜", 1)[0]
+            for line in system_prompt.splitlines()
+            if line.startswith("知识点@")
+        )
+        return json.dumps(
+            {
+                "matches": [
+                    {
+                        "requirement_id": "R1",
+                        "clear_labels": [label],
+                        "possible_labels": [],
+                    }
+                ],
+                "whole_question_matches": [],
+                "additional_matches": [],
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(DeepSeekCandidateRetriever, "request", fake_request)
+
+    summary = run_retrieval(
+        units,
+        catalog,
+        set(labels),
+        output,
+        "test-model",
+        endpoints[0],
+        None,
+        1,
+        1,
+        10.0,
+        None,
+        base_urls=endpoints,
+        concurrency_per_endpoint=1,
+    )
+
+    records = [
+        json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()
+    ]
+    assert summary["completed"] == 4
+    assert {record["endpoint"] for record in records} == set(endpoints)
+
+
 def test_retrieve_only_recovers_requirements_left_uncovered(monkeypatch):
     labels = [f"知识点@分类{i}@标签{i}" for i in range(3)]
     catalog_parts = [
