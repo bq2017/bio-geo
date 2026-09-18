@@ -4,10 +4,13 @@ import pytest
 
 from bio_geo_tagging.call1_candidate_retrieval import (
     DeepSeekCandidateRetriever,
+    REQUIREMENT_PROMPT,
     build_question_text,
     get_input_role,
     load_catalog,
     load_units,
+    normalize_match_result,
+    normalize_requirements,
     normalize_shard_result,
     parse_or_recover_result,
     run_retrieval,
@@ -195,6 +198,65 @@ def test_normalize_shard_result_repairs_format_and_deduplicates():
     assert labels == ["知识点@自然地理@地球仪", "知识点@自然地理@经纬网"]
 
 
+def test_normalize_requirements_validates_unique_complete_items():
+    requirements = normalize_requirements(
+        {
+            "requirements": [
+                {
+                    "requirement_id": "R1",
+                    "question_part": "小题1",
+                    "requirement": "判断河流补给类型",
+                },
+                {
+                    "requirement_id": "R2",
+                    "question_part": "小题2",
+                    "requirement": "分析径流季节变化",
+                },
+            ]
+        }
+    )
+
+    assert [item["requirement_id"] for item in requirements] == ["R1", "R2"]
+
+
+def test_normalize_match_result_keeps_clear_possible_and_additional_matches():
+    allowed = {"知识点@标签一", "知识点@标签二", "知识点@标签三"}
+
+    labels, matches, additional = normalize_match_result(
+        {
+            "matches": [
+                {
+                    "requirement_id": "R1",
+                    "clear_labels": ["知识点@标签一"],
+                    "possible_labels": ["知识点@标签二"],
+                }
+            ],
+            "additional_matches": [
+                {
+                    "question_part": "小题2",
+                    "requirement": "补充要求",
+                    "clear_labels": ["知识点@标签三"],
+                    "possible_labels": [],
+                }
+            ],
+        },
+        allowed,
+        {"R1"},
+        "A1_",
+        allow_additional=True,
+    )
+
+    assert labels == ["知识点@标签一", "知识点@标签二", "知识点@标签三"]
+    assert matches[1]["requirement_id"] == "A1_1"
+    assert additional == [
+        {
+            "requirement_id": "A1_1",
+            "question_part": "小题2",
+            "requirement": "补充要求",
+        }
+    ]
+
+
 def test_parse_or_recover_result_recovers_labels_from_broken_json():
     allowed = {
         "知识点@自然地理@地球仪",
@@ -253,12 +315,37 @@ def test_trace_records_each_shard_and_resume(monkeypatch, tmp_path):
     trace_output = tmp_path / "trace.jsonl"
 
     def fake_request(self, system_prompt, question_text):
+        if system_prompt == REQUIREMENT_PROMPT:
+            return json.dumps(
+                {
+                    "requirements": [
+                        {
+                            "requirement_id": "R1",
+                            "question_part": "题目",
+                            "requirement": "完成题目",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
         label = next(
             line.split("｜", 1)[0]
             for line in system_prompt.splitlines()
             if line.startswith("知识点@")
         )
-        return json.dumps({"candidate_labels": [label]}, ensure_ascii=False)
+        return json.dumps(
+            {
+                "matches": [
+                    {
+                        "requirement_id": "R1",
+                        "clear_labels": [label],
+                        "possible_labels": [],
+                    }
+                ],
+                "additional_matches": [],
+            },
+            ensure_ascii=False,
+        )
 
     monkeypatch.setattr(DeepSeekCandidateRetriever, "request", fake_request)
     arguments = (
@@ -280,3 +367,118 @@ def test_trace_records_each_shard_and_resume(monkeypatch, tmp_path):
     ]
     assert traces[0]["before_consolidation"] == traces[0]["candidate_labels"]
     assert traces[0]["consolidation_used"] is False
+    assert traces[0]["recovery_used"] is False
+    assert traces[0]["uncovered_after_recovery"] == []
+
+
+def test_retrieve_only_recovers_requirements_left_uncovered(monkeypatch):
+    labels = [f"知识点@分类{i}@标签{i}" for i in range(3)]
+    catalog_parts = [
+        (f"{label}｜释义{i}", {label}) for i, label in enumerate(labels)
+    ]
+    retriever = DeepSeekCandidateRetriever(
+        catalog_parts,
+        "test-model",
+        "http://example.test/v1",
+        None,
+        10.0,
+    )
+
+    def fake_request(self, system_prompt, question_text):
+        if system_prompt == REQUIREMENT_PROMPT:
+            return json.dumps(
+                {
+                    "requirements": [
+                        {
+                            "requirement_id": "R1",
+                            "question_part": "小题1",
+                            "requirement": "要求一",
+                        },
+                        {
+                            "requirement_id": "R2",
+                            "question_part": "小题2",
+                            "requirement": "要求二",
+                        },
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        label = next(
+            line.split("｜", 1)[0]
+            for line in system_prompt.splitlines()
+            if line.startswith("知识点@")
+        )
+        if "定向补召回" in system_prompt:
+            matches = []
+            if label == labels[2]:
+                matches = [
+                    {
+                        "requirement_id": "R2",
+                        "clear_labels": [],
+                        "possible_labels": [label],
+                    }
+                ]
+            return json.dumps({"matches": matches}, ensure_ascii=False)
+        matches = []
+        if label == labels[0]:
+            matches = [
+                {
+                    "requirement_id": "R1",
+                    "clear_labels": [label],
+                    "possible_labels": [],
+                }
+            ]
+        return json.dumps(
+            {"matches": matches, "additional_matches": []},
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(DeepSeekCandidateRetriever, "request", fake_request)
+
+    candidates, trace = retriever.retrieve(
+        {"question_id": "q1", "stem": "题目", "sub_questions": []}
+    )
+
+    assert candidates == [labels[0], labels[2]]
+    assert trace["recovery_used"] is True
+    assert [item["requirement_id"] for item in trace["uncovered_before_recovery"]] == ["R2"]
+    assert trace["uncovered_after_recovery"] == []
+    assert trace["recovery_shard_candidate_labels"] == [[], [], [labels[2]]]
+
+
+def test_consolidation_requires_exactly_twenty_labels(monkeypatch):
+    labels = [f"知识点@分类@标签{i}" for i in range(21)]
+    catalog = "\n".join(f"{label}｜释义{i}" for i, label in enumerate(labels))
+    retriever = DeepSeekCandidateRetriever(
+        [(catalog, set(labels))],
+        "test-model",
+        "http://example.test/v1",
+        None,
+        10.0,
+    )
+    requirements = [
+        {"requirement_id": "R1", "question_part": "题目", "requirement": "要求"}
+    ]
+    evidence = {
+        label: {"match_type": "clear", "requirement_ids": ["R1"]}
+        for label in labels
+    }
+
+    monkeypatch.setattr(
+        DeepSeekCandidateRetriever,
+        "request",
+        lambda self, system_prompt, question_text: json.dumps(
+            {"candidate_labels": labels[:19]}, ensure_ascii=False
+        ),
+    )
+    with pytest.raises(ValueError, match="必须恰好20个"):
+        retriever.consolidate("题目", labels, requirements, evidence)
+
+    monkeypatch.setattr(
+        DeepSeekCandidateRetriever,
+        "request",
+        lambda self, system_prompt, question_text: json.dumps(
+            {"candidate_labels": labels[:20]}, ensure_ascii=False
+        ),
+    )
+    assert retriever.consolidate("题目", labels, requirements, evidence) == labels[:20]

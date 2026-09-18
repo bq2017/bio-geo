@@ -20,34 +20,65 @@ DEFAULT_MODEL = "DeepSeek-V4-Flash"
 DEFAULT_BASE_URL = "http://172.22.0.35:9204/v1"
 EXPECTED_LABEL_COUNT = 414
 
-SYSTEM_PROMPT = """你是高中地理知识点候选标签召回器。
+REQUIREMENT_PROMPT = """你负责分析高中地理题目的实际考查要求，暂时不要选择知识点标签。
 
-你的任务是独立理解当前打标对象，从本批给定的标签中找出所有可能成为最终答案的候选标签。本阶段只追求候选召回，不做最终取舍。另有其他批次的标签分别处理，你只判断本批标签。
+按照原题中的题目部分依次处理：普通题处理整道题；大题处理整道题整体以及每个小题。公共材料用于理解各小题，只有确实存在跨小题或整题综合考查时，才单列整道题整体要求。
 
-当多个标签依据各自释义都能合理解释题目的考查内容，而本阶段无法可靠排除其中某个标签时，应将它们都保留为候选，交由下一次调用完成最终判断。这不表示这些标签最终必须同时命中。
+考查要求必须描述完成答案实际需要进行的地理判断、计算、解释、比较或知识应用。结合题干、选项、答案和解析判断：判断或排除选项实际需要的知识应列入；只出现在干扰项文字中的附带内容、解析延伸知识和一般背景不列入。
 
-判断要求：
-1. 输入为整道题时，公共题干和全部小题共同构成打标对象，需要覆盖各小题知识以及整题综合知识；输入为单个小题时，公共题干只用于理解当前小题。
-2. 结合题干、全部小题、选项、已有答案和解析，判断完成题目实际需要的地理知识。
-3. 错误选项涉及的知识、解析中的延伸知识和一般性背景知识不作为候选。
-4. 只能返回标签目录中存在的完整标签路径；所有候选都必须有题目信息和标签释义依据，不因父子、兄弟或其他层级关系机械补充标签。
-5. 候选最多20个，不要求凑满。
+每项要求使用唯一编号R1、R2……，最多20项。只输出JSON对象：
+{"requirements":[{"requirement_id":"R1","question_part":"小题1","requirement":"完成该部分答案实际需要的地理知识或能力"}]}
+"""
 
-输出一个JSON对象：
-{"candidate_labels":["完整标签路径"]}
+SYSTEM_PROMPT = """你是高中地理知识点候选标签召回器。另有其他标签批次分别处理，你只判断本批标签。
+
+原题是最终依据。下面的考查要求清单用于保证整题和各小题得到覆盖；如果原题中还有清单遗漏的实际考查要求，可以通过additional_matches补充。
+
+对标签采用以下统一标准：
+1. 明确匹配：标签定义直接对应完成某项考查要求所需的判断、计算、解释或知识应用，必须保留。
+2. 可能匹配：标签与某项考查要求存在实质对应，但当前阶段无法可靠排除，保留给下一次调用判断。
+3. 主题相关：只与材料主题、地点、对象或关键词相关，没有参与答案形成，不保留。
+4. 明确无关：与考查要求不对应，或仅因父子、兄弟和其他层级关系被联想到，不保留。
+
+判断或排除选项实际需要的知识可以保留；只出现在干扰项文字中的附带内容不保留。解析中参与答案推导的知识可以保留；仅用于扩展说明的知识不保留。
+
+每个候选必须对应一项考查要求。分别列出明确匹配和可能匹配标签；两类都属于候选。不输出主题相关和明确无关标签。只能返回本批目录中的完整标签路径，本批所有候选合计最多20个。
+
+只输出JSON对象：
+{"matches":[{"requirement_id":"R1","clear_labels":["完整标签路径"],"possible_labels":[]}],"additional_matches":[{"question_part":"小题1","requirement":"清单遗漏的实际考查要求","clear_labels":["完整标签路径"],"possible_labels":[]}]}
+
+没有补充要求时additional_matches输出空数组。没有匹配标签的已有要求可以不写入matches。
+
+【考查要求】
+{requirements}
 
 【标签目录】
 {catalog}
 """
 
-CONSOLIDATION_PROMPT = """你是高中地理知识点候选标签召回器。
+RECOVERY_PROMPT = """你负责对高中地理题目中尚未获得候选标签的考查要求进行一次定向补召回，只判断本批标签。
 
-三批标签召回结果已经合并，但候选数量超过20个。请重新根据题目判断，只保留完成当前打标对象可能实际使用的知识点。输入为整道题时需要覆盖全部小题及整题综合知识；输入为单个小题时公共题干只用于理解当前小题。错误选项、背景知识、延伸知识以及仅因主题相近而出现的标签不能保留。
+原题是最终依据。对每项未覆盖要求重新核对本批全部标签：标签定义直接对应要求时列入clear_labels；存在实质对应但无法可靠排除时列入possible_labels。只与主题、地点、对象或关键词相关的标签不保留，不根据标签层级机械补充。
 
-这是候选召回阶段，不是最终打标。多个候选依据各自释义都有合理题目依据且无法可靠排除时，应继续保留；不能仅因为已经保留了更具体、更概括或语义相近的另一个标签，就直接删除当前候选。
+只能返回本批目录中的完整标签路径，本批所有候选合计最多20个。只输出JSON对象：
+{"matches":[{"requirement_id":"R1","clear_labels":["完整标签路径"],"possible_labels":[]}]}
 
-只能从下面的候选中选择，最多20个，不要求凑满。输出一个JSON对象：
+【尚未覆盖的考查要求】
+{requirements}
+
+【标签目录】
+{catalog}
+"""
+
+CONSOLIDATION_PROMPT = """你负责将已经召回的高中地理候选标签收敛为20个，不重新生成标签或重新拆解题目。
+
+候选已经标明对应的考查要求和匹配类型。优先保留明确匹配标签，再保留可能匹配标签；在可能的情况下保持各项考查要求都有候选，不能仅因为已有更具体、更概括或语义相近的标签就删除另一个有独立依据的候选。
+
+只能从下面的候选中选择，必须恰好保留20个。输出一个JSON对象：
 {"candidate_labels":["完整标签路径"]}
+
+【考查要求与候选对应关系】
+{evidence}
 
 【待收敛候选】
 {catalog}
@@ -307,6 +338,131 @@ def normalize_shard_result(result: Any, allowed_paths: set[str]) -> list[str]:
     return labels
 
 
+def normalize_requirements(result: Any) -> list[dict[str, str]]:
+    if not isinstance(result, dict):
+        raise ValueError("考查要求输出不是JSON对象")
+    raw_requirements = result.get("requirements")
+    if not isinstance(raw_requirements, list) or not raw_requirements:
+        raise ValueError("requirements必须是非空数组")
+    if len(raw_requirements) > 20:
+        raise ValueError(f"考查要求超过20项：{len(raw_requirements)}")
+
+    requirements: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+    for item in raw_requirements:
+        if not isinstance(item, dict):
+            raise ValueError("requirements中的元素必须是对象")
+        requirement_id = as_text(item.get("requirement_id"))
+        question_part = as_text(item.get("question_part"))
+        requirement = as_text(item.get("requirement"))
+        if not requirement_id or not question_part or not requirement:
+            raise ValueError("考查要求缺少requirement_id、question_part或requirement")
+        if requirement_id in seen_ids:
+            raise ValueError(f"考查要求编号重复：{requirement_id}")
+        seen_ids.add(requirement_id)
+        requirements.append(
+            {
+                "requirement_id": requirement_id,
+                "question_part": question_part,
+                "requirement": requirement,
+            }
+        )
+    return requirements
+
+
+def normalize_match_result(
+    result: Any,
+    allowed_paths: set[str],
+    known_requirement_ids: set[str],
+    additional_prefix: str,
+    allow_additional: bool,
+) -> tuple[list[str], list[dict[str, Any]], list[dict[str, str]]]:
+    if not isinstance(result, dict):
+        raise ValueError("标签匹配输出不是JSON对象")
+    raw_matches = result.get("matches")
+    if not isinstance(raw_matches, list):
+        raise ValueError("matches必须是数组")
+    raw_additional = result.get("additional_matches", [])
+    if not isinstance(raw_additional, list):
+        raise ValueError("additional_matches必须是数组")
+    if raw_additional and not allow_additional:
+        raise ValueError("定向补召回不能新增考查要求")
+
+    labels: list[str] = []
+    seen_labels: set[str] = set()
+    normalized_matches: list[dict[str, Any]] = []
+    additional_requirements: list[dict[str, str]] = []
+
+    def normalize_labels(raw: Any) -> list[str]:
+        if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+            raise ValueError("clear_labels和possible_labels必须是字符串数组")
+        normalized: list[str] = []
+        local_seen: set[str] = set()
+        ignored = 0
+        for item in raw:
+            label = item.strip().split("｜", 1)[0].strip()
+            if label and not label.startswith("知识点@"):
+                label = f"知识点@{label}"
+            if label not in allowed_paths:
+                ignored += 1
+                continue
+            if label not in local_seen:
+                local_seen.add(label)
+                normalized.append(label)
+            if label not in seen_labels:
+                seen_labels.add(label)
+                labels.append(label)
+        if ignored:
+            logging.info("忽略本批目录外候选：%s个", ignored)
+        return normalized
+
+    def add_match(item: Any, requirement_id: str) -> None:
+        if not isinstance(item, dict):
+            raise ValueError("matches中的元素必须是对象")
+        clear_labels = normalize_labels(item.get("clear_labels", []))
+        possible_labels = [
+            label
+            for label in normalize_labels(item.get("possible_labels", []))
+            if label not in set(clear_labels)
+        ]
+        normalized_matches.append(
+            {
+                "requirement_id": requirement_id,
+                "clear_labels": clear_labels,
+                "possible_labels": possible_labels,
+            }
+        )
+
+    for item in raw_matches:
+        if not isinstance(item, dict):
+            raise ValueError("matches中的元素必须是对象")
+        requirement_id = as_text(item.get("requirement_id"))
+        if requirement_id not in known_requirement_ids:
+            raise ValueError(f"matches引用未知考查要求：{requirement_id}")
+        add_match(item, requirement_id)
+
+    for index, item in enumerate(raw_additional, start=1):
+        if not isinstance(item, dict):
+            raise ValueError("additional_matches中的元素必须是对象")
+        question_part = as_text(item.get("question_part"))
+        requirement = as_text(item.get("requirement"))
+        if not question_part or not requirement:
+            raise ValueError("补充考查要求缺少question_part或requirement")
+        requirement_id = f"{additional_prefix}{index}"
+        additional_requirements.append(
+            {
+                "requirement_id": requirement_id,
+                "question_part": question_part,
+                "requirement": requirement,
+            }
+        )
+        add_match(item, requirement_id)
+
+    if len(labels) > 20:
+        raise ValueError(f"本批候选标签超过20个：{len(labels)}")
+    return labels, normalized_matches, additional_requirements
+
+
 def parse_json_object(content: str) -> dict[str, Any]:
     cleaned = content.strip()
     if cleaned.startswith("```"):
@@ -360,10 +516,7 @@ class DeepSeekCandidateRetriever:
             timeout=timeout,
             max_retries=1,
         )
-        self.catalog_parts = [
-            (SYSTEM_PROMPT.replace("{catalog}", catalog), allowed_paths)
-            for catalog, allowed_paths in catalog_parts
-        ]
+        self.catalog_parts = catalog_parts
         self.catalog_lines = {
             line.split("｜", 1)[0].strip(): line
             for catalog, _ in catalog_parts
@@ -388,40 +541,196 @@ class DeepSeekCandidateRetriever:
             if chunk.choices
         )
 
-    def consolidate(self, question_text: str, candidates: list[str]) -> list[str]:
+    def extract_requirements(self, question_text: str) -> list[dict[str, str]]:
+        content = self.request(REQUIREMENT_PROMPT, question_text)
+        if not content.strip():
+            raise ValueError("考查要求分析返回空内容")
+        return normalize_requirements(parse_json_object(content))
+
+    def retrieve_from_catalog(
+        self,
+        question_text: str,
+        requirements: list[dict[str, str]],
+        catalog: str,
+        allowed_paths: set[str],
+        shard_number: int,
+    ) -> tuple[list[str], list[dict[str, Any]], list[dict[str, str]]]:
+        system_prompt = (
+            SYSTEM_PROMPT
+            .replace("{requirements}", json.dumps(requirements, ensure_ascii=False))
+            .replace("{catalog}", catalog)
+        )
+        content = self.request(system_prompt, question_text)
+        if not content.strip():
+            raise ValueError(f"第{shard_number}批DS返回空内容")
+        result = parse_json_object(content)
+        return normalize_match_result(
+            result,
+            allowed_paths,
+            {item["requirement_id"] for item in requirements},
+            f"A{shard_number}_",
+            allow_additional=True,
+        )
+
+    def recover_uncovered(
+        self,
+        question_text: str,
+        uncovered_requirements: list[dict[str, str]],
+    ) -> tuple[list[str], list[dict[str, Any]], list[list[str]]]:
+        recovered_labels: list[str] = []
+        recovered_matches: list[dict[str, Any]] = []
+        shard_labels: list[list[str]] = []
+        requirement_ids = {
+            item["requirement_id"] for item in uncovered_requirements
+        }
+        rendered_requirements = json.dumps(
+            uncovered_requirements, ensure_ascii=False
+        )
+        for shard_number, (catalog, allowed_paths) in enumerate(
+            self.catalog_parts, start=1
+        ):
+            system_prompt = (
+                RECOVERY_PROMPT
+                .replace("{requirements}", rendered_requirements)
+                .replace("{catalog}", catalog)
+            )
+            content = self.request(system_prompt, question_text)
+            if not content.strip():
+                raise ValueError(f"第{shard_number}批定向补召回返回空内容")
+            labels, matches, _ = normalize_match_result(
+                parse_json_object(content),
+                allowed_paths,
+                requirement_ids,
+                "",
+                allow_additional=False,
+            )
+            shard_labels.append(labels)
+            recovered_labels.extend(labels)
+            recovered_matches.extend(matches)
+        return list(dict.fromkeys(recovered_labels)), recovered_matches, shard_labels
+
+    def consolidate(
+        self,
+        question_text: str,
+        candidates: list[str],
+        requirements: list[dict[str, str]],
+        label_evidence: dict[str, dict[str, Any]],
+    ) -> list[str]:
         candidate_catalog = "\n".join(
             self.catalog_lines[label] for label in candidates
         )
-        system_prompt = CONSOLIDATION_PROMPT.replace("{catalog}", candidate_catalog)
+        evidence = {
+            "requirements": requirements,
+            "candidate_evidence": [
+                {"label": label, **label_evidence[label]}
+                for label in candidates
+            ],
+        }
+        system_prompt = (
+            CONSOLIDATION_PROMPT
+            .replace("{evidence}", json.dumps(evidence, ensure_ascii=False))
+            .replace("{catalog}", candidate_catalog)
+        )
         content = self.request(system_prompt, question_text)
         if not content.strip():
             raise ValueError("候选收敛时DS返回空内容")
         result = parse_or_recover_result(content, set(candidates))
         labels = normalize_shard_result(result, set(candidates))
-        if len(labels) > 20:
-            raise ValueError(f"候选收敛后仍超过20个：{len(labels)}")
+        if len(labels) != 20:
+            raise ValueError(f"候选收敛结果必须恰好20个，实际为{len(labels)}个")
         return labels
 
     def retrieve(self, unit: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
         question_text = build_question_text(unit)
+        requirements = self.extract_requirements(question_text)
         candidates: list[str] = []
         shard_candidates: list[list[str]] = []
-        for part_number, (system_prompt, allowed_paths) in enumerate(
+        shard_matches: list[list[dict[str, Any]]] = []
+        all_matches: list[dict[str, Any]] = []
+        for part_number, (catalog, allowed_paths) in enumerate(
             self.catalog_parts, start=1
         ):
-            content = self.request(system_prompt, question_text)
-            if not content.strip():
-                raise ValueError(f"第{part_number}批DS返回空内容")
-            result = parse_or_recover_result(content, allowed_paths)
-            labels = normalize_shard_result(result, allowed_paths)
+            labels, matches, additional_requirements = self.retrieve_from_catalog(
+                question_text,
+                requirements,
+                catalog,
+                allowed_paths,
+                part_number,
+            )
+            requirements.extend(additional_requirements)
             shard_candidates.append(labels)
+            shard_matches.append(matches)
             candidates.extend(labels)
+            all_matches.extend(matches)
+
+        candidates = list(dict.fromkeys(candidates))
+        covered_requirement_ids = {
+            match["requirement_id"]
+            for match in all_matches
+            if match["clear_labels"] or match["possible_labels"]
+        }
+        uncovered_before_recovery = [
+            requirement
+            for requirement in requirements
+            if requirement["requirement_id"] not in covered_requirement_ids
+        ]
+        recovery_matches: list[dict[str, Any]] = []
+        recovery_shard_candidates: list[list[str]] = []
+        if uncovered_before_recovery:
+            recovered, recovery_matches, recovery_shard_candidates = (
+                self.recover_uncovered(question_text, uncovered_before_recovery)
+            )
+            candidates.extend(
+                label for label in recovered if label not in set(candidates)
+            )
+            all_matches.extend(recovery_matches)
+
+        covered_requirement_ids = {
+            match["requirement_id"]
+            for match in all_matches
+            if match["clear_labels"] or match["possible_labels"]
+        }
+        uncovered_after_recovery = [
+            requirement
+            for requirement in requirements
+            if requirement["requirement_id"] not in covered_requirement_ids
+        ]
+
+        label_evidence: dict[str, dict[str, Any]] = {}
+        for match in all_matches:
+            for match_type, field in (
+                ("clear", "clear_labels"),
+                ("possible", "possible_labels"),
+            ):
+                for label in match[field]:
+                    evidence = label_evidence.setdefault(
+                        label,
+                        {"match_type": match_type, "requirement_ids": []},
+                    )
+                    if match_type == "clear":
+                        evidence["match_type"] = "clear"
+                    if match["requirement_id"] not in evidence["requirement_ids"]:
+                        evidence["requirement_ids"].append(match["requirement_id"])
+
         before_consolidation = candidates.copy()
         if len(candidates) > 20:
             logging.info("三批合并得到%s个候选，执行候选收敛", len(candidates))
-            candidates = self.consolidate(question_text, candidates)
+            candidates = self.consolidate(
+                question_text,
+                candidates,
+                requirements,
+                label_evidence,
+            )
         return candidates, {
+            "requirements": requirements,
+            "shard_candidate_matches": shard_matches,
             "shard_candidate_labels": shard_candidates,
+            "uncovered_before_recovery": uncovered_before_recovery,
+            "recovery_used": bool(uncovered_before_recovery),
+            "recovery_candidate_matches": recovery_matches,
+            "recovery_shard_candidate_labels": recovery_shard_candidates,
+            "uncovered_after_recovery": uncovered_after_recovery,
+            "candidate_evidence": label_evidence,
             "before_consolidation": before_consolidation,
             "consolidation_used": len(before_consolidation) > 20,
             "candidate_labels": candidates,
