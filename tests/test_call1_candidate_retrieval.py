@@ -140,28 +140,58 @@ def test_validate_result_accepts_known_unique_labels():
     assert uncovered is None
 
 
-def test_normalize_pre_candidate_result_repairs_format_and_deduplicates():
-    allowed = {"知识点@自然地理@地球仪", "知识点@自然地理@经纬网"}
+def test_normalize_pre_candidate_result_maps_keys_and_deduplicates():
+    key_to_label = {
+        "L001": "知识点@自然地理@地球仪",
+        "L002": "知识点@自然地理@经纬网",
+    }
 
-    labels = normalize_pre_candidate_result(
+    labels, rejected = normalize_pre_candidate_result(
         {
-            "pre_candidate_labels": [
-                "自然地理@地球仪",
-                "知识点@自然地理@地球仪｜标签释义",
-                "知识点@自然地理@经纬网",
-            ]
+            "pre_candidate_keys": ["L001", "l001｜附加内容", "L002"]
         },
-        allowed,
+        key_to_label,
     )
 
     assert labels == ["知识点@自然地理@地球仪", "知识点@自然地理@经纬网"]
+    assert rejected == []
 
 
-def test_normalize_pre_candidate_result_rejects_unknown_label():
-    with pytest.raises(ValueError, match="目录外标签"):
+def test_normalize_pre_candidate_result_rejects_only_unknown_keys():
+    with pytest.raises(ValueError, match="任何有效临时序号"):
         normalize_pre_candidate_result(
-            {"pre_candidate_labels": ["知识点@不存在"]},
-            {"知识点@自然地理@地球仪"},
+            {"pre_candidate_keys": ["L999"]},
+            {"L001": "知识点@自然地理@地球仪"},
+        )
+
+
+def test_normalize_pre_candidate_result_keeps_valid_and_records_unknown_keys():
+    labels, rejected = normalize_pre_candidate_result(
+        {"pre_candidate_keys": ["L001", "L999"]},
+        {"L001": "知识点@自然地理@地球仪"},
+    )
+
+    assert labels == ["知识点@自然地理@地球仪"]
+    assert rejected == ["L999"]
+
+
+def test_normalize_pre_candidate_result_allows_one_hundred_but_rejects_more():
+    key_to_label = {
+        f"L{index:03d}": f"知识点@标签{index}"
+        for index in range(1, 102)
+    }
+
+    labels, rejected = normalize_pre_candidate_result(
+        {"pre_candidate_keys": list(key_to_label)[:100]},
+        key_to_label,
+    )
+
+    assert len(labels) == 100
+    assert rejected == []
+    with pytest.raises(ValueError, match="超过100个"):
+        normalize_pre_candidate_result(
+            {"pre_candidate_keys": list(key_to_label)},
+            key_to_label,
         )
 
 
@@ -187,24 +217,22 @@ def test_normalize_tagging_evidence_validates_unique_complete_items():
 
 
 def test_normalize_match_result_keeps_clear_possible_and_multiple_evidence():
-    allowed = {"知识点@标签一", "知识点@标签二"}
-
-    labels, matches = normalize_match_result(
+    labels, matches, rejected = normalize_match_result(
         {
             "candidates": [
                 {
-                    "label": "知识点@标签一",
+                    "candidate_key": "C001",
                     "match_type": "clear",
                     "evidence_ids": ["E1", "E2"],
                 },
                 {
-                    "label": "知识点@标签二",
+                    "candidate_key": "C002",
                     "match_type": "possible",
                     "evidence_ids": ["E1", "E2"],
                 },
             ],
         },
-        allowed,
+        {"C001": "知识点@标签一", "C002": "知识点@标签二"},
         {"E1", "E2"},
     )
 
@@ -221,6 +249,7 @@ def test_normalize_match_result_keeps_clear_possible_and_multiple_evidence():
             "evidence_ids": ["E1", "E2"],
         },
     ]
+    assert rejected == []
 
 
 def test_normalize_match_result_rejects_more_than_twenty_candidates():
@@ -231,33 +260,57 @@ def test_normalize_match_result_rejects_more_than_twenty_candidates():
             {
                 "candidates": [
                     {
-                        "label": label,
+                        "candidate_key": f"C{index:03d}",
                         "match_type": "clear",
                         "evidence_ids": ["E1"],
                     }
-                    for label in sorted(allowed)
+                    for index, label in enumerate(sorted(allowed), start=1)
                 ]
             },
-            allowed,
+            {
+                f"C{index:03d}": label
+                for index, label in enumerate(sorted(allowed), start=1)
+            },
             {"E1"},
         )
 
 
-def test_normalize_match_result_rejects_label_outside_pre_candidates():
-    with pytest.raises(ValueError, match="预候选外标签"):
+def test_normalize_match_result_rejects_only_unknown_keys():
+    with pytest.raises(ValueError, match="任何有效候选临时序号"):
         normalize_match_result(
             {
                 "candidates": [
                     {
-                        "label": "知识点@标签二",
+                        "candidate_key": "C999",
                         "match_type": "possible",
                         "evidence_ids": ["E1"],
                     }
                 ]
             },
-            {"知识点@标签一"},
+            {"C001": "知识点@标签一"},
             {"E1"},
         )
+
+
+def test_normalize_match_result_keeps_valid_and_records_unknown_keys():
+    labels, matches, rejected = normalize_match_result(
+        {
+            "candidates": [
+                {
+                    "candidate_key": "C001",
+                    "match_type": "clear",
+                    "evidence_ids": ["E1"],
+                },
+                {"candidate_key": "C999"},
+            ]
+        },
+        {"C001": "知识点@标签一"},
+        {"E1"},
+    )
+
+    assert labels == ["知识点@标签一"]
+    assert matches[0]["label"] == "知识点@标签一"
+    assert rejected == ["C999"]
 
 
 def test_parse_json_object_rejects_malformed_candidate_json():
@@ -314,13 +367,14 @@ def test_trace_records_global_and_final_candidates_and_resume(monkeypatch, tmp_p
             )
         if "全局标签预召回" in system_prompt:
             return json.dumps(
-                {"pre_candidate_labels": labels}, ensure_ascii=False
+                {"pre_candidate_keys": ["L001", "L002", "L003"]},
+                ensure_ascii=False,
             )
         return json.dumps(
             {
                 "candidates": [
                     {
-                        "label": labels[0],
+                        "candidate_key": "C001",
                         "match_type": "clear",
                         "evidence_ids": ["E1"],
                     }
@@ -348,6 +402,7 @@ def test_trace_records_global_and_final_candidates_and_resume(monkeypatch, tmp_p
     ]
     assert len(traces) == 1
     assert traces[0]["global_pre_candidate_labels"] == labels
+    assert traces[0]["rejected_global_candidate_keys"] == []
     assert traces[0]["candidate_labels"] == [labels[0]]
     assert traces[0]["final_candidate_matches"] == [
         {
@@ -357,6 +412,7 @@ def test_trace_records_global_and_final_candidates_and_resume(monkeypatch, tmp_p
         }
     ]
     assert traces[0]["uncovered_evidence"] == []
+    assert traces[0]["rejected_final_candidate_keys"] == []
 
 
 def test_limit_is_applied_before_resume_filter(monkeypatch, tmp_path):
@@ -435,13 +491,14 @@ def test_run_retrieval_shares_work_across_multiple_endpoints(monkeypatch, tmp_pa
             )
         if "全局标签预召回" in system_prompt:
             return json.dumps(
-                {"pre_candidate_labels": labels}, ensure_ascii=False
+                {"pre_candidate_keys": ["L001", "L002", "L003"]},
+                ensure_ascii=False,
             )
         return json.dumps(
             {
                 "candidates": [
                     {
-                        "label": labels[0],
+                        "candidate_key": "C001",
                         "match_type": "clear",
                         "evidence_ids": ["E1"],
                     }
@@ -482,7 +539,6 @@ def test_retrieve_records_uncovered_evidence_without_recovery(monkeypatch):
     )
     retriever = DeepSeekCandidateRetriever(
         catalog,
-        set(labels),
         "test-model",
         "http://example.test/v1",
         None,
@@ -514,13 +570,14 @@ def test_retrieve_records_uncovered_evidence_without_recovery(monkeypatch):
             )
         if "全局标签预召回" in system_prompt:
             return json.dumps(
-                {"pre_candidate_labels": labels}, ensure_ascii=False
+                {"pre_candidate_keys": ["L001", "L002", "L003"]},
+                ensure_ascii=False,
             )
         return json.dumps(
             {
                 "candidates": [
                     {
-                        "label": labels[0],
+                        "candidate_key": "C001",
                         "match_type": "clear",
                         "evidence_ids": ["E1"],
                     }
@@ -546,7 +603,6 @@ def test_retrieve_rejects_malformed_global_json(monkeypatch):
     label = "知识点@自然地理@标签"
     retriever = DeepSeekCandidateRetriever(
         f"{label}｜释义",
-        {label},
         "test-model",
         "http://example.test/v1",
         None,
@@ -567,7 +623,7 @@ def test_retrieve_rejects_malformed_global_json(monkeypatch):
                 },
                 ensure_ascii=False,
             )
-        return '{"pre_candidate_labels":["知识点@自然地理@标签"'
+        return '{"pre_candidate_keys":["L001"'
 
     monkeypatch.setattr(DeepSeekCandidateRetriever, "request", fake_request)
 
@@ -582,7 +638,6 @@ def test_final_selection_allows_fewer_than_twenty_labels(monkeypatch):
     catalog = "\n".join(f"{label}｜释义{i}" for i, label in enumerate(labels))
     retriever = DeepSeekCandidateRetriever(
         catalog,
-        set(labels),
         "test-model",
         "http://example.test/v1",
         None,
@@ -599,19 +654,20 @@ def test_final_selection_allows_fewer_than_twenty_labels(monkeypatch):
             {
                 "candidates": [
                     {
-                        "label": label,
+                        "candidate_key": f"C{i + 1:03d}",
                         "match_type": "clear",
                         "evidence_ids": ["E1"],
                     }
-                    for label in labels[:3]
+                    for i, label in enumerate(labels[:3])
                 ]
             },
             ensure_ascii=False,
         ),
     )
-    selected, matches = retriever.select_final_candidates(
+    selected, matches, rejected = retriever.select_final_candidates(
         "题目", labels, tagging_evidence
     )
 
     assert selected == labels[:3]
     assert len(matches) == 3
+    assert rejected == []

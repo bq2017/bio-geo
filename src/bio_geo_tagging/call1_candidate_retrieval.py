@@ -18,7 +18,8 @@ from tqdm import tqdm
 DEFAULT_MODEL = "DeepSeek-V4-Flash"
 DEFAULT_BASE_URL = "http://172.22.0.35:9204/v1"
 EXPECTED_LABEL_COUNT = 414
-PIPELINE_VERSION = "global-path-v1"
+PIPELINE_VERSION = "global-key-v2"
+MAX_PRE_CANDIDATES = 100
 
 EVIDENCE_PROMPT = """你负责整理高中地理题目中可用于知识点标签判断的标注依据。本步骤只整理原题信息，不选择知识点标签。
 
@@ -53,7 +54,7 @@ EVIDENCE_PROMPT = """你负责整理高中地理题目中可用于知识点标�
 
 GLOBAL_RETRIEVAL_PROMPT = """你负责为高中地理题目进行全局标签预召回。
 
-本步骤看到的是全部414个标签的完整路径，但暂时看不到标签的详细释义。你的任务不是确定最终标签，而是找出下一步需要读取完整释义并继续比较的预候选。
+本步骤看到的是全部414个标签的临时序号和完整路径，但暂时看不到标签的详细释义。你的任务不是确定最终标签，而是找出下一步需要读取完整释义并继续比较的预候选。
 
 先阅读完整原题和标注依据，依次检查普通题或复合题中的公共材料、各小题以及它们共同形成的整题内容，再对照全部标签路径进行召回。
 
@@ -66,15 +67,15 @@ GLOBAL_RETRIEVAL_PROMPT = """你负责为高中地理题目进行全局标签预
 
 不要因为标签属于同一父级、兄弟分支或相同大类而机械加入。与原题没有实际联系的标签不进入预候选。不要在本步骤过早处理标签边界；存在合理可能但不能仅凭路径排除时，应当保留到下一步。
 
-预候选最多80个，不要求凑满。只能输出目录中存在的完整标签路径，不要输出判断理由或其他内容。
+预候选最多100个，不要求凑满。只能输出目录中存在的临时序号，不要重新书写标签路径，不要输出判断理由或其他内容。
 
 只输出JSON对象：
-{"pre_candidate_labels":["完整标签路径"]}
+{"pre_candidate_keys":["L001","L002"]}
 
 【标注依据】
 {tagging_evidence}
 
-【全部标签路径】
+【全部标签临时序号和路径】
 {label_paths}
 """
 
@@ -102,10 +103,10 @@ FINAL_SELECTION_PROMPT = """你负责从全局预召回结果中选择高中地�
 
 同一道题可以同时保留具体知识标签、区域或对象标签和综合标签。每个标签都必须能指出具体证据编号。只出现在错误选项、干扰项或解析扩展内容中的附带知识不作为依据。
 
-最终候选最多20个，可以少于20个，也可以为空，不要凑满。只能从预候选目录中选择。
+最终候选最多20个，可以少于20个，也可以为空，不要凑满。只能返回预候选目录中的临时序号，不要重新书写标签路径。
 
 只输出JSON对象：
-{"candidates":[{"label":"完整标签路径","match_type":"clear","evidence_ids":["E1","E2"]},{"label":"完整标签路径","match_type":"possible","evidence_ids":["E3"]}]}
+{"candidates":[{"candidate_key":"C001","match_type":"clear","evidence_ids":["E1","E2"]},{"candidate_key":"C002","match_type":"possible","evidence_ids":["E3"]}]}
 
 【标注依据】
 {tagging_evidence}
@@ -310,35 +311,39 @@ def validate_result(
 
 
 def normalize_pre_candidate_result(
-    result: Any, allowed_paths: set[str]
-) -> list[str]:
+    result: Any,
+    key_to_label: dict[str, str],
+) -> tuple[list[str], list[str]]:
     if not isinstance(result, dict):
         raise ValueError("全局预召回输出不是JSON对象")
-    raw_labels = result.get("pre_candidate_labels")
-    if not isinstance(raw_labels, list) or not all(
-        isinstance(item, str) for item in raw_labels
+    raw_keys = result.get("pre_candidate_keys")
+    if not isinstance(raw_keys, list) or not all(
+        isinstance(item, str) for item in raw_keys
     ):
-        raise ValueError("pre_candidate_labels必须是字符串数组")
+        raise ValueError("pre_candidate_keys必须是字符串数组")
 
     labels: list[str] = []
     seen: set[str] = set()
-    unknown: list[str] = []
-    for raw_label in raw_labels:
-        label = raw_label.strip().split("｜", 1)[0].strip()
-        if label and not label.startswith("知识点@"):
-            label = f"知识点@{label}"
-        if label not in allowed_paths:
-            unknown.append(label)
+    rejected_keys: list[str] = []
+    for raw_key in raw_keys:
+        key = raw_key.strip().split("｜", 1)[0].strip().upper()
+        label = key_to_label.get(key)
+        if label is None:
+            rejected_keys.append(raw_key.strip())
             continue
         if label not in seen:
             seen.add(label)
             labels.append(label)
 
-    if unknown:
-        raise ValueError(f"全局预召回返回目录外标签：{unknown}")
-    if len(labels) > 80:
-        raise ValueError(f"全局预候选超过80个：{len(labels)}")
-    return labels
+    if raw_keys and not labels:
+        raise ValueError(
+            f"全局预召回未返回任何有效临时序号：{rejected_keys}"
+        )
+    if len(labels) > MAX_PRE_CANDIDATES:
+        raise ValueError(
+            f"全局预候选超过{MAX_PRE_CANDIDATES}个：{len(labels)}"
+        )
+    return labels, rejected_keys
 
 
 def normalize_tagging_evidence(result: Any) -> list[dict[str, str]]:
@@ -375,10 +380,10 @@ def normalize_tagging_evidence(result: Any) -> list[dict[str, str]]:
 
 def normalize_match_result(
     result: Any,
-    allowed_paths: set[str],
+    key_to_label: dict[str, str],
     known_evidence_ids: set[str],
     max_candidates: int = 20,
-) -> tuple[list[str], list[dict[str, Any]]]:
+) -> tuple[list[str], list[dict[str, Any]], list[str]]:
     if not isinstance(result, dict):
         raise ValueError("标签匹配输出不是JSON对象")
     raw_candidates = result.get("candidates")
@@ -388,16 +393,16 @@ def normalize_match_result(
     labels: list[str] = []
     seen_labels: set[str] = set()
     normalized_candidates: list[dict[str, Any]] = []
-    unknown_labels: list[str] = []
+    rejected_keys: list[str] = []
 
     for item in raw_candidates:
         if not isinstance(item, dict):
             raise ValueError("candidates中的元素必须是对象")
-        label = as_text(item.get("label")).split("｜", 1)[0].strip()
-        if label and not label.startswith("知识点@"):
-            label = f"知识点@{label}"
-        if label not in allowed_paths:
-            unknown_labels.append(label)
+        raw_key = as_text(item.get("candidate_key"))
+        key = raw_key.split("｜", 1)[0].strip().upper()
+        label = key_to_label.get(key)
+        if label is None:
+            rejected_keys.append(raw_key)
             continue
         match_type = as_text(item.get("match_type"))
         if match_type not in {"clear", "possible"}:
@@ -424,11 +429,13 @@ def normalize_match_result(
             }
         )
 
-    if unknown_labels:
-        raise ValueError(f"最终判断返回预候选外标签：{unknown_labels}")
+    if raw_candidates and not labels:
+        raise ValueError(
+            f"最终判断未返回任何有效候选临时序号：{rejected_keys}"
+        )
     if len(labels) > max_candidates:
         raise ValueError(f"最终候选超过{max_candidates}个：{len(labels)}")
-    return labels, normalized_candidates
+    return labels, normalized_candidates, rejected_keys
 
 
 def parse_json_object(content: str) -> dict[str, Any]:
@@ -446,7 +453,6 @@ class DeepSeekCandidateRetriever:
     def __init__(
         self,
         catalog: str,
-        allowed_paths: set[str],
         model: str,
         base_url: str,
         api_key: str | None,
@@ -459,12 +465,18 @@ class DeepSeekCandidateRetriever:
             max_retries=1,
         )
         self.base_url = base_url
-        self.allowed_paths = allowed_paths
         self.catalog_lines = {
             line.split("｜", 1)[0].strip(): line
             for line in catalog.splitlines()
         }
-        self.label_paths = "\n".join(self.catalog_lines)
+        self.global_key_to_label = {
+            f"L{index:03d}": label
+            for index, label in enumerate(self.catalog_lines, start=1)
+        }
+        self.label_paths = "\n".join(
+            f"{key}｜{label}"
+            for key, label in self.global_key_to_label.items()
+        )
         self.model = model
 
     def request(
@@ -506,7 +518,7 @@ class DeepSeekCandidateRetriever:
         self,
         question_text: str,
         tagging_evidence: list[dict[str, str]],
-    ) -> list[str]:
+    ) -> tuple[list[str], list[str]]:
         system_prompt = (
             GLOBAL_RETRIEVAL_PROMPT
             .replace(
@@ -519,7 +531,7 @@ class DeepSeekCandidateRetriever:
         if not content.strip():
             raise ValueError("全局预召回返回空内容")
         return normalize_pre_candidate_result(
-            parse_json_object(content), self.allowed_paths
+            parse_json_object(content), self.global_key_to_label
         )
 
     def select_final_candidates(
@@ -527,9 +539,14 @@ class DeepSeekCandidateRetriever:
         question_text: str,
         pre_candidates: list[str],
         tagging_evidence: list[dict[str, str]],
-    ) -> tuple[list[str], list[dict[str, Any]]]:
+    ) -> tuple[list[str], list[dict[str, Any]], list[str]]:
+        key_to_label = {
+            f"C{index:03d}": label
+            for index, label in enumerate(pre_candidates, start=1)
+        }
         candidate_catalog = "\n".join(
-            self.catalog_lines[label] for label in pre_candidates
+            f"{key}｜{self.catalog_lines[label]}"
+            for key, label in key_to_label.items()
         )
         system_prompt = (
             FINAL_SELECTION_PROMPT
@@ -544,22 +561,22 @@ class DeepSeekCandidateRetriever:
             raise ValueError("统一候选判断返回空内容")
         return normalize_match_result(
             parse_json_object(content),
-            set(pre_candidates),
+            key_to_label,
             {item["evidence_id"] for item in tagging_evidence},
         )
 
     def retrieve(self, unit: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
         question_text = build_question_text(unit)
         tagging_evidence = self.extract_tagging_evidence(question_text)
-        pre_candidates = self.retrieve_global_candidates(
+        pre_candidates, rejected_global_keys = self.retrieve_global_candidates(
             question_text, tagging_evidence
         )
         if pre_candidates:
-            candidates, final_matches = self.select_final_candidates(
+            candidates, final_matches, rejected_final_keys = self.select_final_candidates(
                 question_text, pre_candidates, tagging_evidence
             )
         else:
-            candidates, final_matches = [], []
+            candidates, final_matches, rejected_final_keys = [], [], []
 
         covered_evidence_ids = {
             evidence_id
@@ -582,7 +599,9 @@ class DeepSeekCandidateRetriever:
         return candidates, {
             "tagging_evidence": tagging_evidence,
             "global_pre_candidate_labels": pre_candidates,
+            "rejected_global_candidate_keys": rejected_global_keys,
             "final_candidate_matches": final_matches,
+            "rejected_final_candidate_keys": rejected_final_keys,
             "uncovered_evidence": uncovered_evidence,
             "candidate_evidence": candidate_evidence,
             "candidate_labels": candidates,
@@ -668,7 +687,6 @@ def run_retrieval(
             retriever_pool.put(
                 DeepSeekCandidateRetriever(
                     catalog,
-                    allowed_paths,
                     model,
                     endpoint,
                     api_key,
