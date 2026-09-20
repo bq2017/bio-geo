@@ -20,49 +20,110 @@ DEFAULT_MODEL = "DeepSeek-V4-Flash"
 DEFAULT_BASE_URL = "http://172.22.0.35:9204/v1"
 EXPECTED_LABEL_COUNT = 414
 
-EVIDENCE_PROMPT = """你负责整理高中地理题目中可用于知识点标签判断的标注依据，暂时不要选择知识点标签。
+EVIDENCE_PROMPT = """你负责整理高中地理题目中可用于知识点标签判断的标注依据。本步骤只整理原题信息，不选择知识点标签。
 
-标注依据应完整保留原题实际涉及的地理内容，而不是只概括完成答案所需的解题步骤。只要原题中的信息可能支持知识点标签判断，就应纳入标注依据。
+标注依据是原题中能够实际支持知识点标签判断的地理内容。它可以来自某个小题直接涉及的知识、原理、过程、判断或应用，也可以来自完整题目实际展开的区域、地点、研究对象、主题和案例，还可以来自公共题干与多个小题共同形成的综合内容。
 
-按照题目结构处理：
+按照题目结构整理：
 
-普通题：综合题干、选项、答案、解析和图片描述，整理整道题提供的标注依据。
+一、普通题
 
-复合题：
-1. 整理公共题干自身提供的标注依据。
-2. 依次整理每个小题提供的标注依据。处理每个小题时，应结合公共题干，以及当前小题的题干、选项、答案、解析和图片描述。
-3. 整理公共题干与所有小题组成的完整题目共同支持的标注依据。综合完整题目中所有可用于知识点标签判断的信息，整理完整题目共同形成的地理内容。
+综合题干、选项、答案、解析和图片描述，整理整道题实际提供的标注依据。
 
-只出现在错误选项中的附带内容、只用于解析扩展的知识以及与题目主体无关的装饰性信息不作为标注依据。
+二、复合题
 
-每项标注依据使用唯一编号E1、E2……，最多20项。只输出JSON对象：
-{"tagging_evidence":[{"evidence_id":"E1","question_part":"公共题干、小题1、整道题或普通题","content":"可用于知识点标签判断的完整题目信息"}]}
+1. 整理公共题干自身提供的标注依据，包括公共题干明确提供的区域、地点、对象、主题、地理过程、案例和材料信息。
+
+2. 依次整理每个小题的标注依据。处理当前小题时，应结合公共题干以及当前小题的题干、选项、答案、解析和图片描述，说明当前小题实际涉及的地理内容。
+
+3. 检查公共题干与多个小题结合后，是否形成了单个小题不能独立表达的整题标注依据。例如，多个小题共同覆盖同一地理模块的不同内容，或者共同呈现某一区域、对象、主题或案例的完整特征。只有确实形成新的整体性依据时，才增加“整道题”标注依据。不要把公共题干和各小题的内容简单重复汇总为一项整题依据。
+
+以下内容不作为标注依据：
+
+1. 只出现在错误选项或干扰项文字中的附带知识；
+2. 只用于解析扩展、没有参与说明题目实际内容的知识；
+3. 与题目主体无关的装饰性信息；
+4. 只有地理词语，但没有形成具体地理内容的信息。
+
+每项标注依据使用唯一编号E1、E2……，最多20项。
+
+只输出JSON对象，不要输出其他内容：
+{"tagging_evidence":[{"evidence_id":"E1","question_part":"普通题、公共题干、小题1或整道题","content":"原题实际提供的具体地理内容"}]}
 """
 
-SYSTEM_PROMPT = """你是高中地理知识点候选标签召回器。完整标签目录被分成多个批次，其他批次会分别处理，你只判断本批标签。
+SYSTEM_PROMPT = """你是高中地理知识点候选标签召回器。
 
-本阶段的任务是找出所有可能成为本题最终知识点标签的候选标签，不是在本阶段确定最终标签。原题是判断标签的最终依据，标注依据清单用于保证普通题、公共题干、各小题和完整复合题都得到检查。
+完整标签目录已经分成多个批次，其他批次会分别处理。你只判断当前批次中的标签。
 
-阅读完整原题和标注依据清单。
+本阶段的任务是根据完整原题、标注依据和标签释义，保留所有得到具体题目依据支持、具有成为最终标签合理可能的标签。
 
-原题提供完整题目信息；标注依据用于整理题目结构并保证普通题、公共题干、各小题和完整复合题都得到覆盖。判断每个标签时，结合原题的具体内容和相关标注依据进行判断。一个标签可以由一项或多项标注依据共同支持。
+原题是标签判断的最终依据。标注依据清单用于呈现普通题、公共题干、各小题和完整复合题中能够支持标签判断的具体地理内容。标注依据中的重复表述不构成额外支持。
 
-按照以下标准进行判断：
+对当前批次中的每个标签，按照下面的顺序独立判断。
 
-1. 明确匹配：原题的具体内容和相关标注依据能够充分支持标签释义。列入clear_labels。
+第一步：理解标签成立条件
 
-2. 可能匹配：原题的具体内容和相关标注依据与标签释义存在实质联系，使该标签存在成为最终标签的可能，但目前不足以确认。列入possible_labels。
+阅读标签的完整路径和简明释义，明确这个标签成立时，原题需要实际提供什么知识、地理过程、区域内容、研究对象、主题内容、案例特征或综合内容。
 
-3. 不匹配：原题的实际内容和标注依据均不能支持该标签；或者相关内容只出现在错误选项、干扰项或解析扩展中。不列入候选。
+判断依据是标签自身的释义，不能仅根据标签名称进行联想。
 
-每个标签独立判断。已经选择某个标签，不影响其他标签按照自身释义继续判断；不能仅因标签之间存在父子、兄弟或其他层级关系而增加候选。
+第二步：寻找原题中的具体支持
 
-clear_labels和possible_labels都属于候选标签。只能返回本批目录中存在的完整标签路径。不要为了控制数量删除符合明确匹配或可能匹配标准的标签；多批候选合并后会统一收敛为最多20个。
+检查完整原题和标注依据，判断原题是否提供了符合该标签成立条件的具体内容。
 
-只输出以下JSON对象，不要输出其他内容：
-{"matches":[{"evidence_ids":["E1"],"clear_labels":["完整标签路径"],"possible_labels":["完整标签路径"]}]}
+标签可以由以下一种或多种题目信息支持：
 
-没有候选标签的标注依据可以不写入matches。不要输出不匹配标签及其排除理由。
+1. 某个小题直接涉及的知识、原理、过程、判断、计算、比较、解释或应用；
+2. 公共题干或完整题目实际展开的区域、地点、研究对象、主题或案例内容；
+3. 公共题干与多个小题共同形成的综合内容。
+
+区域、地点、对象、主题和案例不因为出现在公共题干中就自动成为候选，也不因为没有直接出现在答案中就被排除。应判断它们是否构成题目实际展开的内容，并且是否符合标签释义。
+
+第三步：区分实际支持与表面联系
+
+实际支持是指原题提供的具体内容已经符合标签释义中的关键内容，使该标签有合理机会成为最终标签。
+
+以下情况只有表面联系，不能作为候选依据：
+
+1. 标签与题目只属于相同的大类或主题；
+2. 原题只出现了与标签相同或相近的名称、词语、地点、区域、主题或对象，但没有呈现标签释义要求的具体内容；
+3. 标签只是已选标签的父级、子级、兄弟标签或其他层级近邻；
+4. 标签只与错误选项、干扰项或解析扩展内容有关；
+5. 标签描述的内容可能与题目背景有关，但原题没有实际展开这一内容。
+
+第四步：给出判断结果
+
+1. 明确匹配
+
+原题提供了具体、充分的标注依据，已经清楚满足标签释义中的关键内容。将标签的match_type设为clear。
+
+2. 可能匹配
+
+原题已经为标签释义中的关键内容提供了具体依据，使该标签有合理可能成为最终标签，但由于题目信息完整度、图片缺失或相邻标签边界等原因，目前不能确认最终是否保留。将标签的match_type设为possible。
+
+“可能匹配”不是“存在一般关联”。如果原题尚未支持标签释义中的关键内容，不能列入possible。
+
+3. 不匹配
+
+原题没有提供符合标签成立条件的具体依据，或者原题与标签之间只有词语、地点、主题、层级或一般背景上的联系。不输出该标签。
+
+不同类型标签使用同一判断原则，但应按照各自释义判断其成立条件：
+
+区域或对象标签：如果该区域或对象是完整题目实际展开的范围，并且题目呈现了符合标签释义的具体区域或对象内容，可以成为候选。仅出现名称不能成为候选。
+
+综合标签：如果公共题干和多个小题共同覆盖了该综合标签要求的多个相关内容，可以成为候选。仅因为题目属于该章节或父级模块，不能成为候选。
+
+具体知识标签：如果原题实际涉及标签描述的知识、原理、过程或应用，可以成为候选。不能因为它与题目中的某个知识点属于同一主题就成为候选。
+
+每个标签独立判断。已经选择某个标签，不影响其他标签按照自身释义继续判断。不能仅根据父子、兄弟或其他层级关系机械增加或排除标签。
+
+不要凑候选数量。只输出满足明确匹配或可能匹配标准的标签。只能输出当前批次目录中存在的完整标签路径。
+
+只输出JSON对象，不要输出其他内容：
+{"candidates":[{"label":"完整标签路径","match_type":"clear","evidence_ids":["E1","E2"]},{"label":"完整标签路径","match_type":"possible","evidence_ids":["E3"]}]}
+
+没有任何标签满足条件时，输出：
+{"candidates":[]}
 
 【标注依据】
 {tagging_evidence}
@@ -71,9 +132,26 @@ clear_labels和possible_labels都属于候选标签。只能返回本批目录�
 {catalog}
 """
 
-CONSOLIDATION_PROMPT = """你负责将已经召回的高中地理候选标签收敛为20个，不重新生成标签或重新拆解题目。
+CONSOLIDATION_PROMPT = """你负责从已经召回的高中地理候选标签中，选出最有可能成为本题最终标签的20个候选。
 
-候选已经标明对应的标注依据和匹配类型。优先保留明确匹配标签，再保留可能匹配标签；在可能的情况下保持各项标注依据都有候选。每个候选根据自身依据独立判断，不能仅因为已有更具体、更概括或语义相近的标签，就删除另一个有独立题目依据的候选。
+这一步不能生成新标签，只能从给定候选中选择。
+
+逐个检查候选标签的释义、原题内容和对应标注依据，优先保留：
+
+1. 原题具体内容充分满足标签释义关键内容的标签；
+2. 由某个小题直接支持的标签；
+3. 由公共题干或完整题目实际展开的区域、对象、主题或案例内容支持的标签；
+4. 由公共题干与多个小题共同形成的综合内容支持的标签；
+5. 虽然存在边界不确定性，但已经得到具体题目依据支持的标签。
+
+优先删除：
+
+1. 只有相同词语、地点、区域或主题联系的标签；
+2. 只有父子、兄弟或其他层级联系的标签；
+3. 题目没有实际展开其释义关键内容的标签；
+4. 只由错误选项、干扰项或解析扩展内容支持的标签。
+
+具体知识标签、区域或对象标签、综合标签使用同一个“是否得到具体题目依据支持”标准，不能仅因标签类型不同而优先保留或排除。
 
 只能从下面的候选中选择，必须恰好保留20个。输出一个JSON对象：
 {"candidate_labels":["完整标签路径"]}
@@ -378,65 +456,52 @@ def normalize_match_result(
 ) -> tuple[list[str], list[dict[str, Any]]]:
     if not isinstance(result, dict):
         raise ValueError("标签匹配输出不是JSON对象")
-    raw_matches = result.get("matches")
-    if not isinstance(raw_matches, list):
-        raise ValueError("matches必须是数组")
+    raw_candidates = result.get("candidates")
+    if not isinstance(raw_candidates, list):
+        raise ValueError("candidates必须是数组")
 
     labels: list[str] = []
     seen_labels: set[str] = set()
-    normalized_matches: list[dict[str, Any]] = []
+    normalized_candidates: list[dict[str, Any]] = []
+    ignored = 0
 
-    def normalize_labels(raw: Any) -> list[str]:
-        if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
-            raise ValueError("clear_labels和possible_labels必须是字符串数组")
-        normalized: list[str] = []
-        local_seen: set[str] = set()
-        ignored = 0
-        for item in raw:
-            label = item.strip().split("｜", 1)[0].strip()
-            if label and not label.startswith("知识点@"):
-                label = f"知识点@{label}"
-            if label not in allowed_paths:
-                ignored += 1
-                continue
-            if label not in local_seen:
-                local_seen.add(label)
-                normalized.append(label)
-            if label not in seen_labels:
-                seen_labels.add(label)
-                labels.append(label)
-        if ignored:
-            logging.info("忽略本批目录外候选：%s个", ignored)
-        return normalized
-
-    for item in raw_matches:
+    for item in raw_candidates:
         if not isinstance(item, dict):
-            raise ValueError("matches中的元素必须是对象")
+            raise ValueError("candidates中的元素必须是对象")
+        label = as_text(item.get("label")).split("｜", 1)[0].strip()
+        if label and not label.startswith("知识点@"):
+            label = f"知识点@{label}"
+        if label not in allowed_paths:
+            ignored += 1
+            continue
+        match_type = as_text(item.get("match_type"))
+        if match_type not in {"clear", "possible"}:
+            raise ValueError("match_type必须是clear或possible")
         raw_evidence_ids = item.get("evidence_ids")
         if not isinstance(raw_evidence_ids, list) or not raw_evidence_ids:
-            raise ValueError("matches中的evidence_ids必须是非空数组")
+            raise ValueError("candidates中的evidence_ids必须是非空数组")
         evidence_ids = [as_text(value) for value in raw_evidence_ids]
         if any(not value for value in evidence_ids):
             raise ValueError("evidence_ids包含空编号")
         evidence_ids = list(dict.fromkeys(evidence_ids))
         unknown_ids = set(evidence_ids).difference(known_evidence_ids)
         if unknown_ids:
-            raise ValueError(f"matches引用未知标注依据：{sorted(unknown_ids)}")
-        clear_labels = normalize_labels(item.get("clear_labels", []))
-        possible_labels = [
-            label
-            for label in normalize_labels(item.get("possible_labels", []))
-            if label not in set(clear_labels)
-        ]
-        normalized_matches.append(
+            raise ValueError(f"candidates引用未知标注依据：{sorted(unknown_ids)}")
+        if label in seen_labels:
+            continue
+        seen_labels.add(label)
+        labels.append(label)
+        normalized_candidates.append(
             {
+                "label": label,
+                "match_type": match_type,
                 "evidence_ids": evidence_ids,
-                "clear_labels": clear_labels,
-                "possible_labels": possible_labels,
             }
         )
 
-    return labels, normalized_matches
+    if ignored:
+        logging.info("忽略本批目录外候选：%s个", ignored)
+    return labels, normalized_candidates
 
 
 def parse_json_object(content: str) -> dict[str, Any]:
@@ -518,12 +583,13 @@ def parse_or_recover_match_result(
             len(recovered_labels),
         )
         return {
-            "matches": [
+            "candidates": [
                 {
+                    "label": path,
+                    "match_type": "possible",
                     "evidence_ids": evidence_ids,
-                    "clear_labels": [],
-                    "possible_labels": [path for _, path in recovered_labels],
                 }
+                for _, path in recovered_labels
             ]
         }
 
@@ -662,7 +728,6 @@ class DeepSeekCandidateRetriever:
         covered_evidence_ids = {
             evidence_id
             for match in all_matches
-            if match["clear_labels"] or match["possible_labels"]
             for evidence_id in match["evidence_ids"]
         }
         uncovered_evidence = [
@@ -673,23 +738,19 @@ class DeepSeekCandidateRetriever:
 
         label_evidence: dict[str, dict[str, Any]] = {}
         for match in all_matches:
-            for match_type, field in (
-                ("clear", "clear_labels"),
-                ("possible", "possible_labels"),
-            ):
-                for label in match[field]:
-                    evidence = label_evidence.setdefault(
-                        label,
-                        {
-                            "match_type": match_type,
-                            "evidence_ids": [],
-                        },
-                    )
-                    if match_type == "clear":
-                        evidence["match_type"] = "clear"
-                    for evidence_id in match["evidence_ids"]:
-                        if evidence_id not in evidence["evidence_ids"]:
-                            evidence["evidence_ids"].append(evidence_id)
+            label = match["label"]
+            evidence = label_evidence.setdefault(
+                label,
+                {
+                    "match_type": match["match_type"],
+                    "evidence_ids": [],
+                },
+            )
+            if match["match_type"] == "clear":
+                evidence["match_type"] = "clear"
+            for evidence_id in match["evidence_ids"]:
+                if evidence_id not in evidence["evidence_ids"]:
+                    evidence["evidence_ids"].append(evidence_id)
 
         before_consolidation = candidates.copy()
         if len(candidates) > 20:

@@ -225,12 +225,17 @@ def test_normalize_match_result_keeps_clear_possible_and_multiple_evidence():
 
     labels, matches = normalize_match_result(
         {
-            "matches": [
+            "candidates": [
                 {
+                    "label": "知识点@标签一",
+                    "match_type": "clear",
                     "evidence_ids": ["E1", "E2"],
-                    "clear_labels": ["知识点@标签一"],
-                    "possible_labels": ["知识点@标签二"],
-                }
+                },
+                {
+                    "label": "知识点@标签二",
+                    "match_type": "possible",
+                    "evidence_ids": ["E1", "E2"],
+                },
             ],
         },
         allowed,
@@ -240,10 +245,15 @@ def test_normalize_match_result_keeps_clear_possible_and_multiple_evidence():
     assert labels == ["知识点@标签一", "知识点@标签二"]
     assert matches == [
         {
+            "label": "知识点@标签一",
+            "match_type": "clear",
             "evidence_ids": ["E1", "E2"],
-            "clear_labels": ["知识点@标签一"],
-            "possible_labels": ["知识点@标签二"],
-        }
+        },
+        {
+            "label": "知识点@标签二",
+            "match_type": "possible",
+            "evidence_ids": ["E1", "E2"],
+        },
     ]
 
 
@@ -252,12 +262,13 @@ def test_normalize_match_result_allows_more_than_twenty_shard_candidates():
 
     labels, _ = normalize_match_result(
         {
-            "matches": [
+            "candidates": [
                 {
+                    "label": label,
+                    "match_type": "clear",
                     "evidence_ids": ["E1"],
-                    "clear_labels": sorted(allowed),
-                    "possible_labels": [],
                 }
+                for label in sorted(allowed)
             ]
         },
         allowed,
@@ -270,20 +281,25 @@ def test_normalize_match_result_allows_more_than_twenty_shard_candidates():
 def test_parse_or_recover_match_result_recovers_malformed_json():
     allowed = {"知识点@自然地理@地球仪", "知识点@自然地理@经纬网"}
     broken = (
-        '{"matches":[{"evidence_ids":["E2"],'
-        '"clear_labels":["知识点@自然地理@地球仪" '
-        '"知识点@自然地理@经纬网"]'
+        '{"candidates":[{"label":"知识点@自然地理@地球仪",'
+        '"match_type":"clear","evidence_ids":["E2"]},'
+        '{"label":"知识点@自然地理@经纬网"'
     )
 
     result = parse_or_recover_match_result(broken, allowed, {"E1", "E2"})
 
     assert result == {
-        "matches": [
+        "candidates": [
             {
+                "label": "知识点@自然地理@地球仪",
+                "match_type": "possible",
                 "evidence_ids": ["E2"],
-                "clear_labels": [],
-                "possible_labels": ["知识点@自然地理@地球仪", "知识点@自然地理@经纬网"],
-            }
+            },
+            {
+                "label": "知识点@自然地理@经纬网",
+                "match_type": "possible",
+                "evidence_ids": ["E2"],
+            },
         ]
     }
 
@@ -366,11 +382,11 @@ def test_trace_records_each_shard_and_resume(monkeypatch, tmp_path):
         )
         return json.dumps(
             {
-                "matches": [
+                "candidates": [
                     {
+                        "label": label,
+                        "match_type": "clear",
                         "evidence_ids": ["E1"],
-                        "clear_labels": [label],
-                        "possible_labels": [],
                     }
                 ],
             },
@@ -481,11 +497,11 @@ def test_run_retrieval_shares_work_across_multiple_endpoints(monkeypatch, tmp_pa
         )
         return json.dumps(
             {
-                "matches": [
+                "candidates": [
                     {
+                        "label": label,
+                        "match_type": "clear",
                         "evidence_ids": ["E1"],
-                        "clear_labels": [label],
-                        "possible_labels": [],
                     }
                 ],
             },
@@ -562,12 +578,12 @@ def test_retrieve_records_uncovered_evidence_without_recovery(monkeypatch):
         if label == labels[0]:
             matches = [
                 {
+                    "label": label,
+                    "match_type": "clear",
                     "evidence_ids": ["E1"],
-                    "clear_labels": [label],
-                    "possible_labels": [],
                 }
             ]
-        return json.dumps({"matches": matches}, ensure_ascii=False)
+        return json.dumps({"candidates": matches}, ensure_ascii=False)
 
     monkeypatch.setattr(DeepSeekCandidateRetriever, "request", fake_request)
 
