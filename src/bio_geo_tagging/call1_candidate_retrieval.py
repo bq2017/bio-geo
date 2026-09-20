@@ -20,12 +20,10 @@ from tqdm import tqdm
 DEFAULT_MODEL = "DeepSeek-V4-Flash"
 DEFAULT_BASE_URL = "http://172.22.0.35:9204/v1"
 EXPECTED_LABEL_COUNT = 414
-PIPELINE_VERSION = "branch-semantic-v5"
-MAX_SELECTED_BRANCHES = 12
-MAX_RECALL_POOL = 80
+PIPELINE_VERSION = "global-boolean-v3"
 EVIDENCE_MAX_SECONDS = 90.0
-BRANCH_MAX_SECONDS = 60.0
-RECALL_MAX_SECONDS = 90.0
+GLOBAL_RECALL_MAX_SECONDS = 120.0
+CANDIDATE_MAX_SECONDS = 90.0
 
 EVIDENCE_PROMPT = """你负责整理高中地理题目中可用于知识点标签判断的标注依据。本步骤只整理原题信息，不选择知识点标签。
 
@@ -58,35 +56,36 @@ EVIDENCE_PROMPT = """你负责整理高中地理题目中可用于知识点标�
 {"tagging_evidence":[{"evidence_id":"E1","question_part":"普通题、公共题干、小题1或整道题","content":"原题实际提供的具体地理内容"}]}
 """
 
-BRANCH_ROUTING_PROMPT = """你负责定位高中地理题目可能涉及的知识点标签分支。
+GLOBAL_RETRIEVAL_PROMPT = """你负责为高中地理题目进行全局标签预召回。
 
-本步骤看到的是标签体系中的分支目录，不是具体知识点标签。你的任务不是选择最终标签，而是找出下一步需要读取简明释义并进行候选召回的分支。
+本步骤看到的是全部414个标签的临时编码和完整路径，但暂时看不到标签的详细释义。你的任务不是确定最终标签，而是逐个判断每个标签是否需要进入下一步读取完整释义并继续比较。
 
-结合完整原题和标注依据，检查普通题的整道题内容，或者复合题中的公共材料、各小题以及它们共同形成的整题内容。每项实际内容可以对应一个或多个分支。
+先阅读完整原题和标注依据，依次检查普通题或复合题中的公共材料、各小题以及它们共同形成的整题内容。然后按照目录顺序逐个判断全部414个标签，不得跳过任何标签。
 
-选择分支的标准：
+以下标签应判断为candidate=true：
 
-1. 标注依据具体涉及该分支所覆盖的知识、原理、过程、区域、对象、主题或案例；
-2. 某项内容可能同时属于两个分支时，可以同时选择两个分支，留给下一步根据标签简明释义继续比较；
-3. 复合题包含多个小题时，应覆盖各小题和整题内容实际涉及的所有分支。
+1. 标签路径直接对应题目涉及的知识、原理、过程、判断、计算、解释或应用；
+2. 地点、区域、研究对象、主题或案例是题目实际展开的内容，并存在使用相应区域或对象标签的合理可能；
+3. 公共材料和多个小题共同形成某一模块的综合内容，使相应综合标签存在合理可能；
+4. 两个或多个相近标签仅凭名称无法可靠区分，需要读取完整释义后再判断。
 
-每个分支必须填写支持它的标注依据编号。只有大类相同、名称相近或一般背景上的联系，不能作为选择依据。不要选择原题没有实际涉及的分支，也不要因为分支中可能存在某个相邻标签而选择整个分支。
+不要因为标签属于同一父级、兄弟分支或相同大类而机械判断为true。与原题没有实际联系的标签判断为false。不要在本步骤过早处理标签边界；存在合理可能但不能仅凭路径排除时，应当判断为true，留到下一步继续比较。
 
-最多选择12个分支，不要求凑满。只能使用目录中存在的分支临时序号和标注依据中存在的编号，不要输出其他内容。
+必须为目录中的每个临时编码返回且只返回一次判断。candidate只能是JSON布尔值true或false。不要重新书写标签路径，不要输出判断理由或其他内容。
 
 只输出JSON对象：
-{"branches":[{"branch_key":"B8F3A2D1","evidence_ids":["E1"]},{"branch_key":"B19C7E40","evidence_ids":["E2","E3"]}]}
+{"judgements":[{"label_key":"K8F3A2D1","candidate":true},{"label_key":"K19C7E40","candidate":false}]}
 
 【标注依据】
 {tagging_evidence}
 
-【标签分支目录】
-{branch_catalog}
+【全部标签临时编码和路径】
+{label_paths}
 """
 
-CANDIDATE_RECALL_PROMPT = """你负责从相关标签分支中召回高中地理知识点候选标签。
+FINAL_SELECTION_PROMPT = """你负责从全局预召回结果中选择高中地理知识点候选标签。
 
-本步骤已经提供所选分支内具体标签、综合标签及其简明释义。请结合完整原题、标注依据和简明释义进行统一比较。输出的是供下一次调用完成最终打标的候选集合，不是本次直接确定最终标签。
+本步骤已经为每个预候选提供完整路径和简明释义。请重新结合完整原题、标注依据和标签释义进行统一比较。最终输出的是供下一次调用继续判断的候选集合，不是强行确定唯一答案。
 
 按照以下顺序处理：
 
@@ -118,7 +117,7 @@ CANDIDATE_RECALL_PROMPT = """你负责从相关标签分支中召回高中地理
 【标注依据】
 {tagging_evidence}
 
-【待比较标签及简明释义】
+【预候选标签及简明释义】
 {candidate_catalog}
 """
 
@@ -155,21 +154,6 @@ def make_label_key(label_path: str) -> str:
         label_path.encode("utf-8"), digest_size=4
     ).hexdigest().upper()
     return f"K{digest}"
-
-
-def make_branch_key(branch_path: str) -> str:
-    digest = hashlib.blake2s(
-        branch_path.encode("utf-8"), digest_size=4
-    ).hexdigest().upper()
-    return f"B{digest}"
-
-
-def get_label_branch(label_path: str) -> str:
-    return "@".join(label_path.split("@")[:3])
-
-
-def is_comprehensive_label(label_path: str) -> bool:
-    return "综合" in label_path.rsplit("@", 1)[-1]
 
 
 def as_text(value: Any) -> str:
@@ -366,70 +350,56 @@ def validate_result(
     return labels, uncovered_topic
 
 
-def normalize_branch_result(
+def normalize_global_judgements(
     result: Any,
-    key_to_branch: dict[str, str],
-    valid_evidence_ids: set[str],
-) -> tuple[list[str], list[dict[str, Any]], list[str]]:
+    key_to_label: dict[str, str],
+) -> tuple[list[str], list[dict[str, Any]]]:
     if not isinstance(result, dict):
-        raise ValueError("分支定位输出不是JSON对象")
-    raw_branches = result.get("branches")
-    if not isinstance(raw_branches, list):
-        raise ValueError("branches必须是数组")
+        raise ValueError("全局预召回输出不是JSON对象")
+    raw_judgements = result.get("judgements")
+    if not isinstance(raw_judgements, list):
+        raise ValueError("judgements必须是数组")
 
-    branches: list[str] = []
-    matches_by_branch: dict[str, dict[str, Any]] = {}
-    rejected_keys: list[str] = []
-    for item in raw_branches:
+    judgements_by_key: dict[str, bool] = {}
+    for item in raw_judgements:
         if not isinstance(item, dict):
-            raise ValueError("branches中的每一项必须是对象")
-        raw_key = item.get("branch_key")
-        raw_evidence_ids = item.get("evidence_ids")
+            raise ValueError("judgements中的每一项必须是对象")
+        raw_key = item.get("label_key")
         if not isinstance(raw_key, str) or not raw_key.strip():
-            raise ValueError("branch_key必须是非空字符串")
-        if not isinstance(raw_evidence_ids, list) or not raw_evidence_ids:
-            raise ValueError("每个分支必须提供非空evidence_ids数组")
-        if not all(isinstance(value, str) for value in raw_evidence_ids):
-            raise ValueError("evidence_ids必须是字符串数组")
-
-        evidence_ids = list(dict.fromkeys(
-            value.strip() for value in raw_evidence_ids if value.strip()
-        ))
-        if not evidence_ids:
-            raise ValueError("每个分支必须提供有效的标注依据编号")
-        unknown_evidence_ids = [
-            value for value in evidence_ids if value not in valid_evidence_ids
-        ]
-        if unknown_evidence_ids:
-            raise ValueError(f"分支引用了不存在的标注依据：{unknown_evidence_ids}")
+            raise ValueError("label_key必须是非空字符串")
+        candidate = item.get("candidate")
+        if not isinstance(candidate, bool):
+            raise ValueError("candidate必须是JSON布尔值true或false")
 
         key = raw_key.strip().split("｜", 1)[0].strip().upper()
-        branch = key_to_branch.get(key)
-        if branch is None:
-            rejected_keys.append(raw_key.strip())
-            continue
-        if branch not in matches_by_branch:
-            branches.append(branch)
-            matches_by_branch[branch] = {
-                "branch": branch,
-                "evidence_ids": evidence_ids,
-            }
-        else:
-            existing_ids = matches_by_branch[branch]["evidence_ids"]
-            matches_by_branch[branch]["evidence_ids"] = list(dict.fromkeys(
-                [*existing_ids, *evidence_ids]
-            ))
+        if key not in key_to_label:
+            raise ValueError(f"全局预召回返回目录外临时编码：{raw_key.strip()}")
+        if key in judgements_by_key:
+            raise ValueError(f"全局预召回重复判断临时编码：{key}")
+        judgements_by_key[key] = candidate
 
-    if raw_branches and not branches:
+    missing_keys = [key for key in key_to_label if key not in judgements_by_key]
+    if missing_keys:
         raise ValueError(
-            f"分支定位未返回任何有效临时序号：{rejected_keys}"
+            f"全局预召回未逐个判断全部标签，缺少{len(missing_keys)}个："
+            f"{missing_keys[:10]}"
         )
-    if len(branches) > MAX_SELECTED_BRANCHES:
+    if len(judgements_by_key) != len(key_to_label):
         raise ValueError(
-            f"所选分支超过{MAX_SELECTED_BRANCHES}个：{len(branches)}"
+            f"全局预召回判断数量错误：应为{len(key_to_label)}个，"
+            f"实际为{len(judgements_by_key)}个"
         )
-    matches = [matches_by_branch[branch] for branch in branches]
-    return branches, matches, rejected_keys
+
+    normalized = [
+        {
+            "label_key": key,
+            "label": label,
+            "candidate": judgements_by_key[key],
+        }
+        for key, label in key_to_label.items()
+    ]
+    labels = [item["label"] for item in normalized if item["candidate"]]
+    return labels, normalized
 
 
 def normalize_tagging_evidence(result: Any) -> list[dict[str, str]]:
@@ -564,17 +534,9 @@ class DeepSeekCandidateRetriever:
         self.label_to_key = {
             label: key for key, label in self.global_key_to_label.items()
         }
-        branches = list(dict.fromkeys(
-            get_label_branch(label) for label in self.catalog_lines
-        ))
-        self.branch_key_to_path = {
-            make_branch_key(branch): branch for branch in branches
-        }
-        if len(self.branch_key_to_path) != len(branches):
-            raise ValueError("标签分支临时编码发生碰撞")
-        self.branch_catalog = "\n".join(
-            f"{key}｜{branch}"
-            for key, branch in self.branch_key_to_path.items()
+        self.label_paths = "\n".join(
+            f"{key}｜{label}"
+            for key, label in self.global_key_to_label.items()
         )
         self.model = model
 
@@ -657,81 +619,53 @@ class DeepSeekCandidateRetriever:
         except Exception as error:
             raise StageResponseError("标注依据", content, error) from error
 
-    def locate_branches(
+    def retrieve_global_candidates(
         self,
         question_text: str,
         tagging_evidence: list[dict[str, str]],
-    ) -> tuple[list[str], list[dict[str, Any]], list[str]]:
+    ) -> tuple[list[str], list[dict[str, Any]]]:
         system_prompt = (
-            BRANCH_ROUTING_PROMPT
+            GLOBAL_RETRIEVAL_PROMPT
             .replace(
                 "{tagging_evidence}",
                 json.dumps(tagging_evidence, ensure_ascii=False),
             )
-            .replace("{branch_catalog}", self.branch_catalog)
+            .replace("{label_paths}", self.label_paths)
         )
         content = self.request_stage(
-            "分支定位",
+            "全局预召回",
             system_prompt,
             question_text,
-            max_tokens=1024,
-            max_seconds=BRANCH_MAX_SECONDS,
+            max_tokens=8192,
+            max_seconds=GLOBAL_RECALL_MAX_SECONDS,
         )
         if not content.strip():
             raise StageResponseError(
-                "分支定位", content, ValueError("返回空内容")
+                "全局预召回", content, ValueError("返回空内容")
             )
         try:
-            return normalize_branch_result(
+            return normalize_global_judgements(
                 parse_json_object(content),
-                self.branch_key_to_path,
-                {item["evidence_id"] for item in tagging_evidence},
+                self.global_key_to_label,
             )
         except Exception as error:
-            raise StageResponseError("分支定位", content, error) from error
+            raise StageResponseError("全局预召回", content, error) from error
 
-    def build_recall_pool(self, selected_branches: list[str]) -> list[str]:
-        selected = set(selected_branches)
-        selected_top_levels = {
-            branch.split("@")[1] for branch in selected_branches
-        }
-        recall_pool: list[str] = []
-        for label in self.catalog_lines:
-            parts = label.split("@")
-            in_selected_branch = get_label_branch(label) in selected
-            is_top_level_comprehensive = (
-                len(parts) == 3
-                and parts[1] in selected_top_levels
-                and is_comprehensive_label(label)
-            )
-            if in_selected_branch or is_top_level_comprehensive:
-                recall_pool.append(label)
-        if len(recall_pool) > MAX_RECALL_POOL:
-            raise StageResponseError(
-                "候选池构建",
-                "",
-                ValueError(
-                    f"所选分支形成的待比较标签超过{MAX_RECALL_POOL}个："
-                    f"{len(recall_pool)}"
-                ),
-            )
-        return recall_pool
-
-    def recall_candidates(
+    def select_final_candidates(
         self,
         question_text: str,
-        recall_pool: list[str],
+        pre_candidates: list[str],
         tagging_evidence: list[dict[str, str]],
     ) -> tuple[list[str], list[dict[str, Any]], list[str]]:
         key_to_label = {
-            self.label_to_key[label]: label for label in recall_pool
+            self.label_to_key[label]: label for label in pre_candidates
         }
         candidate_catalog = "\n".join(
             f"{key}｜{self.catalog_lines[label]}"
             for key, label in key_to_label.items()
         )
         system_prompt = (
-            CANDIDATE_RECALL_PROMPT
+            FINAL_SELECTION_PROMPT
             .replace(
                 "{tagging_evidence}",
                 json.dumps(tagging_evidence, ensure_ascii=False),
@@ -739,15 +673,15 @@ class DeepSeekCandidateRetriever:
             .replace("{candidate_catalog}", candidate_catalog)
         )
         content = self.request_stage(
-            "候选召回",
+            "候选判断",
             system_prompt,
             question_text,
             max_tokens=2048,
-            max_seconds=RECALL_MAX_SECONDS,
+            max_seconds=CANDIDATE_MAX_SECONDS,
         )
         if not content.strip():
             raise StageResponseError(
-                "候选召回", content, ValueError("返回空内容")
+                "候选判断", content, ValueError("返回空内容")
             )
         try:
             return normalize_match_result(
@@ -756,18 +690,17 @@ class DeepSeekCandidateRetriever:
                 {item["evidence_id"] for item in tagging_evidence},
             )
         except Exception as error:
-            raise StageResponseError("候选召回", content, error) from error
+            raise StageResponseError("候选判断", content, error) from error
 
     def retrieve(self, unit: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
         question_text = build_question_text(unit)
         tagging_evidence = self.extract_tagging_evidence(question_text)
-        selected_branches, branch_matches, rejected_branch_keys = (
-            self.locate_branches(question_text, tagging_evidence)
+        pre_candidates, global_judgements = self.retrieve_global_candidates(
+            question_text, tagging_evidence
         )
-        recall_pool = self.build_recall_pool(selected_branches)
-        if recall_pool:
-            candidates, final_matches, rejected_final_keys = self.recall_candidates(
-                question_text, recall_pool, tagging_evidence
+        if pre_candidates:
+            candidates, final_matches, rejected_final_keys = self.select_final_candidates(
+                question_text, pre_candidates, tagging_evidence
             )
         else:
             candidates, final_matches, rejected_final_keys = [], [], []
@@ -792,10 +725,8 @@ class DeepSeekCandidateRetriever:
         }
         return candidates, {
             "tagging_evidence": tagging_evidence,
-            "selected_branches": selected_branches,
-            "selected_branch_matches": branch_matches,
-            "rejected_branch_keys": rejected_branch_keys,
-            "global_pre_candidate_labels": recall_pool,
+            "global_pre_judgements": global_judgements,
+            "global_pre_candidate_labels": pre_candidates,
             "final_candidate_matches": final_matches,
             "rejected_final_candidate_keys": rejected_final_keys,
             "uncovered_evidence": uncovered_evidence,

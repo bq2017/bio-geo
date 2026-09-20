@@ -11,15 +11,24 @@ from bio_geo_tagging.call1_candidate_retrieval import (
     get_input_role,
     load_catalog,
     load_units,
-    make_branch_key,
     make_label_key,
-    normalize_branch_result,
+    normalize_global_judgements,
     normalize_match_result,
     normalize_tagging_evidence,
     parse_json_object,
     run_retrieval,
     validate_result,
 )
+
+
+def make_judgements(keys, selected=None):
+    selected = set(keys if selected is None else selected)
+    return {
+        "judgements": [
+            {"label_key": key, "candidate": key in selected}
+            for key in keys
+        ]
+    }
 
 
 def test_load_catalog_returns_exact_paths(tmp_path):
@@ -144,142 +153,82 @@ def test_validate_result_accepts_known_unique_labels():
     assert uncovered is None
 
 
-def test_normalize_branch_result_maps_keys_and_deduplicates():
-    key_to_branch = {
-        "L001": "知识点@自然地理@地球仪",
-        "L002": "知识点@自然地理@经纬网",
+def test_normalize_global_judgements_requires_every_label_once():
+    key_to_label = {
+        "K001": "知识点@自然地理@地球仪",
+        "K002": "知识点@自然地理@经纬网",
+        "K003": "知识点@自然地理@地图",
     }
 
-    branches, matches, rejected = normalize_branch_result(
+    labels, judgements = normalize_global_judgements(
         {
-            "branches": [
-                {"branch_key": "L001", "evidence_ids": ["E1"]},
-                {"branch_key": "l001｜附加内容", "evidence_ids": ["E2"]},
-                {"branch_key": "L002", "evidence_ids": ["E2"]},
+            "judgements": [
+                {"label_key": "K001", "candidate": False},
+                {"label_key": "k002", "candidate": True},
+                {"label_key": "K003", "candidate": False},
             ]
         },
-        key_to_branch,
-        {"E1", "E2"},
+        key_to_label,
     )
 
-    assert branches == ["知识点@自然地理@地球仪", "知识点@自然地理@经纬网"]
-    assert matches == [
+    assert labels == ["知识点@自然地理@经纬网"]
+    assert judgements == [
         {
-            "branch": "知识点@自然地理@地球仪",
-            "evidence_ids": ["E1", "E2"],
+            "label_key": "K001",
+            "label": "知识点@自然地理@地球仪",
+            "candidate": False,
         },
-        {"branch": "知识点@自然地理@经纬网", "evidence_ids": ["E2"]},
-    ]
-    assert rejected == []
-
-
-def test_normalize_branch_result_rejects_only_unknown_keys():
-    with pytest.raises(ValueError, match="任何有效临时序号"):
-        normalize_branch_result(
-            {
-                "branches": [
-                    {"branch_key": "L999", "evidence_ids": ["E1"]}
-                ]
-            },
-            {"L001": "知识点@自然地理@地球仪"},
-            {"E1"},
-        )
-
-
-def test_normalize_branch_result_keeps_valid_and_records_unknown_keys():
-    branches, matches, rejected = normalize_branch_result(
         {
-            "branches": [
-                {"branch_key": "L001", "evidence_ids": ["E1"]},
-                {"branch_key": "L999", "evidence_ids": ["E1"]},
-            ]
+            "label_key": "K002",
+            "label": "知识点@自然地理@经纬网",
+            "candidate": True,
         },
-        {"L001": "知识点@自然地理@地球仪"},
-        {"E1"},
-    )
-
-    assert branches == ["知识点@自然地理@地球仪"]
-    assert matches == [
-        {"branch": "知识点@自然地理@地球仪", "evidence_ids": ["E1"]}
+        {
+            "label_key": "K003",
+            "label": "知识点@自然地理@地图",
+            "candidate": False,
+        },
     ]
-    assert rejected == ["L999"]
 
 
-def test_normalize_branch_result_allows_twelve_but_rejects_more():
-    key_to_branch = {
-        f"L{index:03d}": f"知识点@标签{index}"
-        for index in range(1, 14)
-    }
-
-    branches_input = [
-        {"branch_key": key, "evidence_ids": ["E1"]}
-        for key in key_to_branch
-    ]
-    branches, matches, rejected = normalize_branch_result(
-        {"branches": branches_input[:12]},
-        key_to_branch,
-        {"E1"},
-    )
-
-    assert len(branches) == 12
-    assert len(matches) == 12
-    assert rejected == []
-    with pytest.raises(ValueError, match="超过12个"):
-        normalize_branch_result(
-            {"branches": branches_input},
-            key_to_branch,
-            {"E1"},
-        )
-
-
-def test_normalize_branch_result_requires_evidence():
-    with pytest.raises(ValueError, match="非空evidence_ids"):
-        normalize_branch_result(
+@pytest.mark.parametrize(
+    ("judgements", "message"),
+    [
+        ([{"label_key": "K001", "candidate": True}], "缺少1个"),
+        (
+            [
+                {"label_key": "K001", "candidate": True},
+                {"label_key": "K001", "candidate": False},
+            ],
+            "重复判断",
+        ),
+        (
+            [
+                {"label_key": "K001", "candidate": True},
+                {"label_key": "K999", "candidate": False},
+            ],
+            "目录外",
+        ),
+        (
+            [
+                {"label_key": "K001", "candidate": "true"},
+                {"label_key": "K002", "candidate": False},
+            ],
+            "JSON布尔值",
+        ),
+    ],
+)
+def test_normalize_global_judgements_rejects_incomplete_or_invalid_output(
+    judgements, message
+):
+    with pytest.raises(ValueError, match=message):
+        normalize_global_judgements(
+            {"judgements": judgements},
             {
-                "branches": [
-                    {"branch_key": "L001", "evidence_ids": []}
-                ]
+                "K001": "知识点@自然地理@地球仪",
+                "K002": "知识点@自然地理@经纬网",
             },
-            {"L001": "知识点@自然地理@地球仪"},
-            {"E1"},
         )
-
-
-def test_normalize_branch_result_rejects_unknown_evidence():
-    with pytest.raises(ValueError, match="不存在的标注依据"):
-        normalize_branch_result(
-            {
-                "branches": [
-                    {"branch_key": "L001", "evidence_ids": ["E9"]}
-                ]
-            },
-            {"L001": "知识点@自然地理@地球仪"},
-            {"E1"},
-        )
-
-
-def test_recall_pool_includes_branch_and_top_level_comprehensive_labels():
-    labels = [
-        "知识点@自然地理@地球的运动@地球公转特征",
-        "知识点@自然地理@地球的运动@地球的运动综合",
-        "知识点@自然地理@自然地理综合",
-        "知识点@自然地理@大气的运动@锋面天气系统",
-        "知识点@自然地理@大气的运动@大气的运动综合",
-        "知识点@人文地理@人文地理综合",
-    ]
-    retriever = DeepSeekCandidateRetriever(
-        "\n".join(f"{label}｜释义" for label in labels),
-        "test-model",
-        "http://example.test/v1",
-        None,
-        10.0,
-    )
-
-    recall_pool = retriever.build_recall_pool([
-        "知识点@自然地理@地球的运动"
-    ])
-
-    assert recall_pool == labels[:3]
 
 
 def test_request_stage_preserves_partial_response(monkeypatch):
@@ -454,7 +403,6 @@ def test_validate_result_rejects_invalid_candidates(candidate_labels):
 def test_trace_records_global_and_final_candidates_and_resume(monkeypatch, tmp_path):
     labels = [f"知识点@分类{i}@标签{i}" for i in range(3)]
     keys = [make_label_key(label) for label in labels]
-    branch_keys = [make_branch_key(label) for label in labels]
     catalog = "\n".join(
         f"{label}｜释义{index}" for index, label in enumerate(labels)
     )
@@ -478,16 +426,8 @@ def test_trace_records_global_and_final_candidates_and_resume(monkeypatch, tmp_p
                 },
                 ensure_ascii=False,
             )
-        if "定位高中地理题目可能涉及" in system_prompt:
-            return json.dumps(
-                {
-                    "branches": [
-                        {"branch_key": key, "evidence_ids": ["E1"]}
-                        for key in branch_keys
-                    ]
-                },
-                ensure_ascii=False,
-            )
+        if "全局标签预召回" in system_prompt:
+            return json.dumps(make_judgements(keys), ensure_ascii=False)
         return json.dumps(
             {
                 "candidates": [
@@ -520,12 +460,10 @@ def test_trace_records_global_and_final_candidates_and_resume(monkeypatch, tmp_p
     ]
     assert len(traces) == 1
     assert traces[0]["global_pre_candidate_labels"] == labels
-    assert traces[0]["selected_branches"] == labels
-    assert traces[0]["selected_branch_matches"] == [
-        {"branch": label, "evidence_ids": ["E1"]}
-        for label in labels
+    assert traces[0]["global_pre_judgements"] == [
+        {"label_key": key, "label": label, "candidate": True}
+        for key, label in zip(keys, labels)
     ]
-    assert traces[0]["rejected_branch_keys"] == []
     assert traces[0]["candidate_labels"] == [labels[0]]
     assert traces[0]["final_candidate_matches"] == [
         {
@@ -587,7 +525,6 @@ def test_run_retrieval_shares_work_across_multiple_endpoints(monkeypatch, tmp_pa
 
     labels = [f"知识点@分类{i}@标签{i}" for i in range(3)]
     keys = [make_label_key(label) for label in labels]
-    branch_keys = [make_branch_key(label) for label in labels]
     catalog = "\n".join(
         f"{label}｜释义{index}" for index, label in enumerate(labels)
     )
@@ -616,16 +553,8 @@ def test_run_retrieval_shares_work_across_multiple_endpoints(monkeypatch, tmp_pa
                 },
                 ensure_ascii=False,
             )
-        if "定位高中地理题目可能涉及" in system_prompt:
-            return json.dumps(
-                {
-                    "branches": [
-                        {"branch_key": key, "evidence_ids": ["E1"]}
-                        for key in branch_keys
-                    ]
-                },
-                ensure_ascii=False,
-            )
+        if "全局标签预召回" in system_prompt:
+            return json.dumps(make_judgements(keys), ensure_ascii=False)
         return json.dumps(
             {
                 "candidates": [
@@ -667,7 +596,6 @@ def test_run_retrieval_shares_work_across_multiple_endpoints(monkeypatch, tmp_pa
 def test_retrieve_records_uncovered_evidence_without_recovery(monkeypatch):
     labels = [f"知识点@分类{i}@标签{i}" for i in range(3)]
     keys = [make_label_key(label) for label in labels]
-    branch_keys = [make_branch_key(label) for label in labels]
     catalog = "\n".join(
         f"{label}｜释义{i}" for i, label in enumerate(labels)
     )
@@ -704,16 +632,8 @@ def test_retrieve_records_uncovered_evidence_without_recovery(monkeypatch):
                 },
                 ensure_ascii=False,
             )
-        if "定位高中地理题目可能涉及" in system_prompt:
-            return json.dumps(
-                {
-                    "branches": [
-                        {"branch_key": key, "evidence_ids": ["E1"]}
-                        for key in branch_keys
-                    ]
-                },
-                ensure_ascii=False,
-            )
+        if "全局标签预召回" in system_prompt:
+            return json.dumps(make_judgements(keys), ensure_ascii=False)
         return json.dumps(
             {
                 "candidates": [
@@ -766,11 +686,11 @@ def test_retrieve_rejects_malformed_global_json(monkeypatch):
                 },
                 ensure_ascii=False,
             )
-        return '{"branches":[{"branch_key":"B001"'
+        return '{"judgements":[{"label_key":"K001"'
 
     monkeypatch.setattr(DeepSeekCandidateRetriever, "request", fake_request)
 
-    with pytest.raises(StageResponseError, match="分支定位阶段"):
+    with pytest.raises(StageResponseError, match="全局预召回阶段"):
         retriever.retrieve(
             {"question_id": "q1", "stem": "题目", "sub_questions": []}
         )
@@ -781,7 +701,7 @@ def test_run_retrieval_saves_stage_and_raw_failed_response(monkeypatch, tmp_path
     unit = {"question_id": "q1", "stem": "题目"}
     output = tmp_path / "candidates.jsonl"
     failure_trace = tmp_path / "failures.jsonl"
-    broken = '{"branches":[{"branch_key":"B12345678"'
+    broken = '{"judgements":[{"label_key":"K12345678"'
 
     def fake_request(
         self, system_prompt, question_text, max_tokens=2048, max_seconds=90.0
@@ -821,11 +741,11 @@ def test_run_retrieval_saves_stage_and_raw_failed_response(monkeypatch, tmp_path
     failure = json.loads(failure_trace.read_text(encoding="utf-8"))
     assert summary["errors"] == 1
     assert failure["status"] == "failed"
-    assert failure["attempts"][0]["stage"] == "分支定位"
+    assert failure["attempts"][0]["stage"] == "全局预召回"
     assert failure["attempts"][0]["raw_response"] == broken
 
 
-def test_candidate_recall_allows_fewer_than_twenty_labels(monkeypatch):
+def test_candidate_selection_allows_fewer_than_twenty_labels(monkeypatch):
     labels = [f"知识点@分类@标签{i}" for i in range(21)]
     keys = [make_label_key(label) for label in labels]
     catalog = "\n".join(f"{label}｜释义{i}" for i, label in enumerate(labels))
@@ -858,7 +778,7 @@ def test_candidate_recall_allows_fewer_than_twenty_labels(monkeypatch):
             ensure_ascii=False,
         ),
     )
-    selected, matches, rejected = retriever.recall_candidates(
+    selected, matches, rejected = retriever.select_final_candidates(
         "题目", labels, tagging_evidence
     )
 
