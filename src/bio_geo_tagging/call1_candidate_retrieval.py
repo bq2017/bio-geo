@@ -6,7 +6,6 @@ import argparse
 import json
 import logging
 import os
-import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from queue import Queue
@@ -19,6 +18,7 @@ from tqdm import tqdm
 DEFAULT_MODEL = "DeepSeek-V4-Flash"
 DEFAULT_BASE_URL = "http://172.22.0.35:9204/v1"
 EXPECTED_LABEL_COUNT = 414
+PIPELINE_VERSION = "global-path-v1"
 
 EVIDENCE_PROMPT = """你负责整理高中地理题目中可用于知识点标签判断的标注依据。本步骤只整理原题信息，不选择知识点标签。
 
@@ -51,116 +51,67 @@ EVIDENCE_PROMPT = """你负责整理高中地理题目中可用于知识点标�
 {"tagging_evidence":[{"evidence_id":"E1","question_part":"普通题、公共题干、小题1或整道题","content":"原题实际提供的具体地理内容"}]}
 """
 
-SYSTEM_PROMPT = """你是高中地理知识点候选标签召回器。
+GLOBAL_RETRIEVAL_PROMPT = """你负责为高中地理题目进行全局标签预召回。
 
-完整标签目录已经分成多个批次，其他批次会分别处理。你只判断当前批次中的标签。
+本步骤看到的是全部414个标签的完整路径，但暂时看不到标签的详细释义。你的任务不是确定最终标签，而是找出下一步需要读取完整释义并继续比较的预候选。
 
-本阶段的任务是根据完整原题、标注依据和标签释义，保留所有得到具体题目依据支持、具有成为最终标签合理可能的标签。
+先阅读完整原题和标注依据，依次检查普通题或复合题中的公共材料、各小题以及它们共同形成的整题内容，再对照全部标签路径进行召回。
 
-原题是标签判断的最终依据。标注依据清单用于呈现普通题、公共题干、各小题和完整复合题中能够支持标签判断的具体地理内容。标注依据中的重复表述不构成额外支持。
+以下标签应进入预候选：
 
-对当前批次中的每个标签，按照下面的顺序独立判断。
+1. 标签路径直接对应题目涉及的知识、原理、过程、判断、计算、解释或应用；
+2. 地点、区域、研究对象、主题或案例是题目实际展开的内容，并存在使用相应区域或对象标签的合理可能；
+3. 公共材料和多个小题共同形成某一模块的综合内容，使相应综合标签存在合理可能；
+4. 两个或多个相近标签仅凭名称无法可靠区分，需要读取完整释义后再判断。
 
-第一步：理解标签成立条件
+不要因为标签属于同一父级、兄弟分支或相同大类而机械加入。与原题没有实际联系的标签不进入预候选。不要在本步骤过早处理标签边界；存在合理可能但不能仅凭路径排除时，应当保留到下一步。
 
-阅读标签的完整路径和简明释义，明确这个标签成立时，原题需要实际提供什么知识、地理过程、区域内容、研究对象、主题内容、案例特征或综合内容。
+预候选最多80个，不要求凑满。只能输出目录中存在的完整标签路径，不要输出判断理由或其他内容。
 
-判断依据是标签自身的释义，不能仅根据标签名称进行联想。
-
-第二步：寻找原题中的具体支持
-
-检查完整原题和标注依据，判断原题是否提供了符合该标签成立条件的具体内容。
-
-标签可以由以下一种或多种题目信息支持：
-
-1. 某个小题直接涉及的知识、原理、过程、判断、计算、比较、解释或应用；
-2. 公共题干或完整题目实际展开的区域、地点、研究对象、主题或案例内容；
-3. 公共题干与多个小题共同形成的综合内容。
-
-区域、地点、对象、主题和案例不因为出现在公共题干中就自动成为候选，也不因为没有直接出现在答案中就被排除。应判断它们是否构成题目实际展开的内容，并且是否符合标签释义。
-
-第三步：区分实际支持与表面联系
-
-实际支持是指原题提供的具体内容已经符合标签释义中的关键内容，使该标签有合理机会成为最终标签。
-
-以下情况只有表面联系，不能作为候选依据：
-
-1. 标签与题目只属于相同的大类或主题；
-2. 原题只出现了与标签相同或相近的名称、词语、地点、区域、主题或对象，但没有呈现标签释义要求的具体内容；
-3. 标签只是已选标签的父级、子级、兄弟标签或其他层级近邻；
-4. 标签只与错误选项、干扰项或解析扩展内容有关；
-5. 标签描述的内容可能与题目背景有关，但原题没有实际展开这一内容。
-
-第四步：给出判断结果
-
-1. 明确匹配
-
-原题提供了具体、充分的标注依据，已经清楚满足标签释义中的关键内容。将标签的match_type设为clear。
-
-2. 可能匹配
-
-原题已经为标签释义中的关键内容提供了具体依据，使该标签有合理可能成为最终标签，但由于题目信息完整度、图片缺失或相邻标签边界等原因，目前不能确认最终是否保留。将标签的match_type设为possible。
-
-“可能匹配”不是“存在一般关联”。如果原题尚未支持标签释义中的关键内容，不能列入possible。
-
-3. 不匹配
-
-原题没有提供符合标签成立条件的具体依据，或者原题与标签之间只有词语、地点、主题、层级或一般背景上的联系。不输出该标签。
-
-不同类型标签使用同一判断原则，但应按照各自释义判断其成立条件：
-
-区域或对象标签：如果该区域或对象是完整题目实际展开的范围，并且题目呈现了符合标签释义的具体区域或对象内容，可以成为候选。仅出现名称不能成为候选。
-
-综合标签：如果公共题干和多个小题共同覆盖了该综合标签要求的多个相关内容，可以成为候选。仅因为题目属于该章节或父级模块，不能成为候选。
-
-具体知识标签：如果原题实际涉及标签描述的知识、原理、过程或应用，可以成为候选。不能因为它与题目中的某个知识点属于同一主题就成为候选。
-
-每个标签独立判断。已经选择某个标签，不影响其他标签按照自身释义继续判断。不能仅根据父子、兄弟或其他层级关系机械增加或排除标签。
-
-不要凑候选数量。只输出满足明确匹配或可能匹配标准的标签。只能输出当前批次目录中存在的完整标签路径。
-
-只输出JSON对象，不要输出其他内容：
-{"candidates":[{"label":"完整标签路径","match_type":"clear","evidence_ids":["E1","E2"]},{"label":"完整标签路径","match_type":"possible","evidence_ids":["E3"]}]}
-
-没有任何标签满足条件时，输出：
-{"candidates":[]}
+只输出JSON对象：
+{"pre_candidate_labels":["完整标签路径"]}
 
 【标注依据】
 {tagging_evidence}
 
-【标签目录】
-{catalog}
+【全部标签路径】
+{label_paths}
 """
 
-CONSOLIDATION_PROMPT = """你负责从已经召回的高中地理候选标签中，选出最有可能成为本题最终标签的20个候选。
+FINAL_SELECTION_PROMPT = """你负责从全局预召回结果中选择高中地理知识点候选标签。
 
-这一步不能生成新标签，只能从给定候选中选择。
+本步骤已经为每个预候选提供完整路径和简明释义。请重新结合完整原题、标注依据和标签释义进行统一比较。最终输出的是供下一次调用继续判断的候选集合，不是强行确定唯一答案。
 
-逐个检查候选标签的释义、原题内容和对应标注依据，优先保留：
+按照以下顺序处理：
 
-1. 原题具体内容充分满足标签释义关键内容的标签；
-2. 由某个小题直接支持的标签；
-3. 由公共题干或完整题目实际展开的区域、对象、主题或案例内容支持的标签；
-4. 由公共题干与多个小题共同形成的综合内容支持的标签；
-5. 虽然存在边界不确定性，但已经得到具体题目依据支持的标签。
+第一步，阅读标签释义，明确标签描述的知识、过程、区域、对象、主题、案例或综合范围。
 
-优先删除：
+第二步，在完整原题和标注依据中寻找支持。支持可以来自某个小题，也可以来自公共材料实际展开的内容，或者来自公共材料与多个小题共同形成的完整题目内容。
 
-1. 只有相同词语、地点、区域或主题联系的标签；
-2. 只有父子、兄弟或其他层级联系的标签；
-3. 题目没有实际展开其释义关键内容的标签；
-4. 只由错误选项、干扰项或解析扩展内容支持的标签。
+第三步，判断标签与题目的关系：
 
-具体知识标签、区域或对象标签、综合标签使用同一个“是否得到具体题目依据支持”标准，不能仅因标签类型不同而优先保留或排除。
+1. 明确匹配：原题提供了直接、充分的依据，标签释义清楚覆盖题目的实际内容，match_type设为clear。
+2. 可能匹配：原题已经提供与标签关键语义直接相关的具体内容，使其具有成为最终标签的合理可能，但仍需要下一次调用结合边界决定是否保留，match_type设为possible。
+3. 不匹配：标签与题目没有实际联系，或者只有同类、层级、词语和一般背景上的联系，不输出。
 
-只能从下面的候选中选择，必须恰好保留20个。输出一个JSON对象：
-{"candidate_labels":["完整标签路径"]}
+区域或对象标签：当该区域或对象是题目的主要研究范围，并且题目实际展开了其地理内容时，可以保留；不能因为同时存在气候、农业、工业等具体标签就排除区域标签。
 
-【标注依据与候选对应关系】
-{evidence}
+综合标签：当完整题目的内容落在该综合标签覆盖范围内，或者公共材料与多个小题共同形成相关模块内容时，可以保留；不能因为已经选择具体标签就自动排除综合标签。
 
-【待收敛候选】
-{catalog}
+具体知识或专题标签：当题目直接涉及其知识、原理、过程、判断或应用时，可以保留。
+
+同一道题可以同时保留具体知识标签、区域或对象标签和综合标签。每个标签都必须能指出具体证据编号。只出现在错误选项、干扰项或解析扩展内容中的附带知识不作为依据。
+
+最终候选最多20个，可以少于20个，也可以为空，不要凑满。只能从预候选目录中选择。
+
+只输出JSON对象：
+{"candidates":[{"label":"完整标签路径","match_type":"clear","evidence_ids":["E1","E2"]},{"label":"完整标签路径","match_type":"possible","evidence_ids":["E3"]}]}
+
+【标注依据】
+{tagging_evidence}
+
+【预候选标签及简明释义】
+{candidate_catalog}
 """
 
 
@@ -201,35 +152,6 @@ def load_catalog(
     if len(set(paths)) != len(paths):
         raise ValueError("标签目录存在重复路径")
     return "\n".join(lines), set(paths)
-
-
-def split_catalog(catalog: str, parts: int = 3) -> list[tuple[str, set[str]]]:
-    if parts <= 0:
-        raise ValueError("标签目录分批数必须大于0")
-    lines = catalog.splitlines()
-    semantic_groups: dict[str, list[tuple[int, str]]] = {}
-    for index, line in enumerate(lines):
-        label_path = line.split("｜", 1)[0].strip()
-        parent_path = label_path.rsplit("@", 1)[0]
-        semantic_groups.setdefault(parent_path, []).append((index, line))
-
-    chunks: list[list[tuple[int, str]]] = [[] for _ in range(parts)]
-    groups = sorted(
-        semantic_groups.values(),
-        key=lambda group: (-len(group), group[0][0]),
-    )
-    for group in groups:
-        target = min(range(parts), key=lambda index: (len(chunks[index]), index))
-        chunks[target].extend(group)
-
-    ordered_chunks = [
-        [line for _, line in sorted(chunk)]
-        for chunk in chunks
-    ]
-    return [
-        ("\n".join(chunk), {line.split("｜", 1)[0].strip() for line in chunk})
-        for chunk in ordered_chunks
-    ]
 
 
 def make_unit_key(unit: dict[str, Any]) -> str:
@@ -387,33 +309,35 @@ def validate_result(
     return labels, uncovered_topic
 
 
-def normalize_shard_result(result: Any, allowed_paths: set[str]) -> list[str]:
+def normalize_pre_candidate_result(
+    result: Any, allowed_paths: set[str]
+) -> list[str]:
     if not isinstance(result, dict):
-        raise ValueError("DS输出不是JSON对象")
-    raw_labels = result.get("candidate_labels")
+        raise ValueError("全局预召回输出不是JSON对象")
+    raw_labels = result.get("pre_candidate_labels")
     if not isinstance(raw_labels, list) or not all(
         isinstance(item, str) for item in raw_labels
     ):
-        raise ValueError("candidate_labels必须是字符串数组")
+        raise ValueError("pre_candidate_labels必须是字符串数组")
 
     labels: list[str] = []
     seen: set[str] = set()
-    ignored = 0
+    unknown: list[str] = []
     for raw_label in raw_labels:
         label = raw_label.strip().split("｜", 1)[0].strip()
         if label and not label.startswith("知识点@"):
             label = f"知识点@{label}"
         if label not in allowed_paths:
-            ignored += 1
+            unknown.append(label)
             continue
         if label not in seen:
             seen.add(label)
             labels.append(label)
 
-    if len(labels) > 20:
-        raise ValueError(f"本批候选标签超过20个：{len(labels)}")
-    if ignored:
-        logging.info("忽略本批目录外候选：%s个", ignored)
+    if unknown:
+        raise ValueError(f"全局预召回返回目录外标签：{unknown}")
+    if len(labels) > 80:
+        raise ValueError(f"全局预候选超过80个：{len(labels)}")
     return labels
 
 
@@ -453,6 +377,7 @@ def normalize_match_result(
     result: Any,
     allowed_paths: set[str],
     known_evidence_ids: set[str],
+    max_candidates: int = 20,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     if not isinstance(result, dict):
         raise ValueError("标签匹配输出不是JSON对象")
@@ -463,7 +388,7 @@ def normalize_match_result(
     labels: list[str] = []
     seen_labels: set[str] = set()
     normalized_candidates: list[dict[str, Any]] = []
-    ignored = 0
+    unknown_labels: list[str] = []
 
     for item in raw_candidates:
         if not isinstance(item, dict):
@@ -472,7 +397,7 @@ def normalize_match_result(
         if label and not label.startswith("知识点@"):
             label = f"知识点@{label}"
         if label not in allowed_paths:
-            ignored += 1
+            unknown_labels.append(label)
             continue
         match_type = as_text(item.get("match_type"))
         if match_type not in {"clear", "possible"}:
@@ -499,8 +424,10 @@ def normalize_match_result(
             }
         )
 
-    if ignored:
-        logging.info("忽略本批目录外候选：%s个", ignored)
+    if unknown_labels:
+        raise ValueError(f"最终判断返回预候选外标签：{unknown_labels}")
+    if len(labels) > max_candidates:
+        raise ValueError(f"最终候选超过{max_candidates}个：{len(labels)}")
     return labels, normalized_candidates
 
 
@@ -515,89 +442,11 @@ def parse_json_object(content: str) -> dict[str, Any]:
     return result
 
 
-def parse_or_recover_result(
-    content: str, allowed_paths: set[str]
-) -> dict[str, Any]:
-    try:
-        return parse_json_object(content)
-    except (json.JSONDecodeError, ValueError):
-        cleaned = content.strip().removesuffix("```").strip()
-        if not cleaned.endswith("}"):
-            raise
-        matches: list[tuple[int, str]] = []
-        for path in allowed_paths:
-            variants = (path, path.removeprefix("知识点@"))
-            positions = []
-            for variant in variants:
-                for match in re.finditer(re.escape(variant), content):
-                    end = match.end()
-                    if end == len(content) or content[end] in '\"｜,]}\n\r':
-                        positions.append(match.start())
-            if positions:
-                matches.append((min(positions), path))
-        if not matches:
-            raise
-        matches.sort()
-        logging.warning("DS输出JSON无效，已从返回文本恢复%s个标签", len(matches))
-        return {"candidate_labels": [path for _, path in matches]}
-
-
-def parse_or_recover_match_result(
-    content: str,
-    allowed_paths: set[str],
-    known_evidence_ids: set[str],
-) -> dict[str, Any]:
-    try:
-        return parse_json_object(content)
-    except (json.JSONDecodeError, ValueError):
-        recovered_labels: list[tuple[int, str]] = []
-        for path in allowed_paths:
-            positions: list[int] = []
-            for variant in (path, path.removeprefix("知识点@")):
-                for match in re.finditer(re.escape(variant), content):
-                    end = match.end()
-                    if end == len(content) or content[end] in '\"｜,]}\n\r':
-                        positions.append(match.start())
-            if positions:
-                recovered_labels.append((min(positions), path))
-        if not recovered_labels:
-            raise
-
-        recovered_labels.sort()
-        evidence_ids = [
-            evidence_id
-            for evidence_id in sorted(
-                known_evidence_ids,
-                key=lambda value: (
-                    (0, int(value[1:]))
-                    if value[1:].isdigit()
-                    else (1, value)
-                ),
-            )
-            if re.search(rf"(?<![A-Za-z0-9_]){re.escape(evidence_id)}(?![A-Za-z0-9_])", content)
-        ]
-        if not evidence_ids:
-            evidence_ids = sorted(known_evidence_ids)
-        logging.warning(
-            "DS输出JSON无效，已从标签匹配文本恢复%s个候选",
-            len(recovered_labels),
-        )
-        return {
-            "candidates": [
-                {
-                    "label": path,
-                    "match_type": "possible",
-                    "evidence_ids": evidence_ids,
-                }
-                for _, path in recovered_labels
-            ]
-        }
-
-
 class DeepSeekCandidateRetriever:
     def __init__(
         self,
-        catalog_parts: list[tuple[str, set[str]]],
+        catalog: str,
+        allowed_paths: set[str],
         model: str,
         base_url: str,
         api_key: str | None,
@@ -610,30 +459,42 @@ class DeepSeekCandidateRetriever:
             max_retries=1,
         )
         self.base_url = base_url
-        self.catalog_parts = catalog_parts
+        self.allowed_paths = allowed_paths
         self.catalog_lines = {
             line.split("｜", 1)[0].strip(): line
-            for catalog, _ in catalog_parts
             for line in catalog.splitlines()
         }
+        self.label_paths = "\n".join(self.catalog_lines)
         self.model = model
 
-    def request(self, system_prompt: str, question_text: str) -> str:
+    def request(
+        self,
+        system_prompt: str,
+        question_text: str,
+        max_tokens: int = 2048,
+    ) -> str:
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": question_text},
             ],
-            max_tokens=2048,
+            max_tokens=max_tokens,
             stream=True,
             temperature=0,
         )
-        return "".join(
-            chunk.choices[0].delta.content or ""
-            for chunk in response
-            if chunk.choices
-        )
+        content: list[str] = []
+        finish_reason: str | None = None
+        for chunk in response:
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            content.append(choice.delta.content or "")
+            if choice.finish_reason:
+                finish_reason = choice.finish_reason
+        if finish_reason == "length":
+            raise ValueError("DS输出达到长度限制，结果可能被截断")
+        return "".join(content)
 
     def extract_tagging_evidence(self, question_text: str) -> list[dict[str, str]]:
         content = self.request(EVIDENCE_PROMPT, question_text)
@@ -641,93 +502,68 @@ class DeepSeekCandidateRetriever:
             raise ValueError("标注依据整理返回空内容")
         return normalize_tagging_evidence(parse_json_object(content))
 
-    def retrieve_from_catalog(
+    def retrieve_global_candidates(
         self,
         question_text: str,
         tagging_evidence: list[dict[str, str]],
-        catalog: str,
-        allowed_paths: set[str],
-        shard_number: int,
-    ) -> tuple[list[str], list[dict[str, Any]]]:
+    ) -> list[str]:
         system_prompt = (
-            SYSTEM_PROMPT
+            GLOBAL_RETRIEVAL_PROMPT
             .replace(
                 "{tagging_evidence}",
                 json.dumps(tagging_evidence, ensure_ascii=False),
             )
-            .replace("{catalog}", catalog)
+            .replace("{label_paths}", self.label_paths)
         )
-        content = self.request(system_prompt, question_text)
+        content = self.request(system_prompt, question_text, max_tokens=4096)
         if not content.strip():
-            raise ValueError(f"第{shard_number}批DS返回空内容")
-        result = parse_or_recover_match_result(
-            content,
-            allowed_paths,
-            {item["evidence_id"] for item in tagging_evidence},
-        )
-        return normalize_match_result(
-            result,
-            allowed_paths,
-            {item["evidence_id"] for item in tagging_evidence},
+            raise ValueError("全局预召回返回空内容")
+        return normalize_pre_candidate_result(
+            parse_json_object(content), self.allowed_paths
         )
 
-    def consolidate(
+    def select_final_candidates(
         self,
         question_text: str,
-        candidates: list[str],
+        pre_candidates: list[str],
         tagging_evidence: list[dict[str, str]],
-        label_evidence: dict[str, dict[str, Any]],
-    ) -> list[str]:
+    ) -> tuple[list[str], list[dict[str, Any]]]:
         candidate_catalog = "\n".join(
-            self.catalog_lines[label] for label in candidates
+            self.catalog_lines[label] for label in pre_candidates
         )
-        evidence = {
-            "tagging_evidence": tagging_evidence,
-            "candidate_evidence": [
-                {"label": label, **label_evidence[label]}
-                for label in candidates
-            ],
-        }
         system_prompt = (
-            CONSOLIDATION_PROMPT
-            .replace("{evidence}", json.dumps(evidence, ensure_ascii=False))
-            .replace("{catalog}", candidate_catalog)
+            FINAL_SELECTION_PROMPT
+            .replace(
+                "{tagging_evidence}",
+                json.dumps(tagging_evidence, ensure_ascii=False),
+            )
+            .replace("{candidate_catalog}", candidate_catalog)
         )
-        content = self.request(system_prompt, question_text)
+        content = self.request(system_prompt, question_text, max_tokens=4096)
         if not content.strip():
-            raise ValueError("候选收敛时DS返回空内容")
-        result = parse_or_recover_result(content, set(candidates))
-        labels = normalize_shard_result(result, set(candidates))
-        if len(labels) != 20:
-            raise ValueError(f"候选收敛结果必须恰好20个，实际为{len(labels)}个")
-        return labels
+            raise ValueError("统一候选判断返回空内容")
+        return normalize_match_result(
+            parse_json_object(content),
+            set(pre_candidates),
+            {item["evidence_id"] for item in tagging_evidence},
+        )
 
     def retrieve(self, unit: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
         question_text = build_question_text(unit)
         tagging_evidence = self.extract_tagging_evidence(question_text)
-        candidates: list[str] = []
-        shard_candidates: list[list[str]] = []
-        shard_matches: list[list[dict[str, Any]]] = []
-        all_matches: list[dict[str, Any]] = []
-        for part_number, (catalog, allowed_paths) in enumerate(
-            self.catalog_parts, start=1
-        ):
-            labels, matches = self.retrieve_from_catalog(
-                question_text,
-                tagging_evidence,
-                catalog,
-                allowed_paths,
-                part_number,
+        pre_candidates = self.retrieve_global_candidates(
+            question_text, tagging_evidence
+        )
+        if pre_candidates:
+            candidates, final_matches = self.select_final_candidates(
+                question_text, pre_candidates, tagging_evidence
             )
-            shard_candidates.append(labels)
-            shard_matches.append(matches)
-            candidates.extend(labels)
-            all_matches.extend(matches)
+        else:
+            candidates, final_matches = [], []
 
-        candidates = list(dict.fromkeys(candidates))
         covered_evidence_ids = {
             evidence_id
-            for match in all_matches
+            for match in final_matches
             for evidence_id in match["evidence_ids"]
         }
         uncovered_evidence = [
@@ -736,39 +572,19 @@ class DeepSeekCandidateRetriever:
             if evidence["evidence_id"] not in covered_evidence_ids
         ]
 
-        label_evidence: dict[str, dict[str, Any]] = {}
-        for match in all_matches:
-            label = match["label"]
-            evidence = label_evidence.setdefault(
-                label,
-                {
-                    "match_type": match["match_type"],
-                    "evidence_ids": [],
-                },
-            )
-            if match["match_type"] == "clear":
-                evidence["match_type"] = "clear"
-            for evidence_id in match["evidence_ids"]:
-                if evidence_id not in evidence["evidence_ids"]:
-                    evidence["evidence_ids"].append(evidence_id)
-
-        before_consolidation = candidates.copy()
-        if len(candidates) > 20:
-            logging.info("三批合并得到%s个候选，执行候选收敛", len(candidates))
-            candidates = self.consolidate(
-                question_text,
-                candidates,
-                tagging_evidence,
-                label_evidence,
-            )
+        candidate_evidence = {
+            match["label"]: {
+                "match_type": match["match_type"],
+                "evidence_ids": match["evidence_ids"],
+            }
+            for match in final_matches
+        }
         return candidates, {
             "tagging_evidence": tagging_evidence,
-            "shard_candidate_matches": shard_matches,
-            "shard_candidate_labels": shard_candidates,
+            "global_pre_candidate_labels": pre_candidates,
+            "final_candidate_matches": final_matches,
             "uncovered_evidence": uncovered_evidence,
-            "candidate_evidence": label_evidence,
-            "before_consolidation": before_consolidation,
-            "consolidation_used": len(before_consolidation) > 20,
+            "candidate_evidence": candidate_evidence,
             "candidate_labels": candidates,
         }
 
@@ -812,7 +628,6 @@ def run_retrieval(
     concurrency_per_endpoint: int | None = None,
 ) -> dict[str, int]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    catalog_parts = split_catalog(catalog)
     selected_units = units[:limit] if limit is not None else units
     completed = load_completed(output_path)
     unit_keys = {make_unit_key(unit) for unit in selected_units}
@@ -820,6 +635,10 @@ def run_retrieval(
     if stale_keys:
         raise ValueError(f"输出文件含有不属于当前输入的记录：{sorted(stale_keys)}")
     for record in completed.values():
+        if record.get("pipeline_version") != PIPELINE_VERSION:
+            raise ValueError(
+                "已有候选结果由旧版召回流程生成，请为新版流程使用新的输出文件"
+            )
         validate_result(record, allowed_paths)
     trace_keys: set[str] = set()
     if trace_output is not None:
@@ -848,7 +667,8 @@ def run_retrieval(
         for _ in range(slots_per_endpoint):
             retriever_pool.put(
                 DeepSeekCandidateRetriever(
-                    catalog_parts,
+                    catalog,
+                    allowed_paths,
                     model,
                     endpoint,
                     api_key,
@@ -877,9 +697,14 @@ def run_retrieval(
                         "uncovered_topic": None,
                         "model": model,
                         "endpoint": retriever.base_url,
+                        "pipeline_version": PIPELINE_VERSION,
                         "status": "completed",
                     }
-                    return record, {"unit_key": unit_key, **trace}
+                    return record, {
+                        "unit_key": unit_key,
+                        "pipeline_version": PIPELINE_VERSION,
+                        **trace,
+                    }
                 except Exception as error:
                     last_error = error
                     logging.warning(

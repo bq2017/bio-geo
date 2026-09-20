@@ -10,12 +10,10 @@ from bio_geo_tagging.call1_candidate_retrieval import (
     load_catalog,
     load_units,
     normalize_match_result,
+    normalize_pre_candidate_result,
     normalize_tagging_evidence,
-    normalize_shard_result,
-    parse_or_recover_match_result,
-    parse_or_recover_result,
+    parse_json_object,
     run_retrieval,
-    split_catalog,
     validate_result,
 )
 
@@ -34,45 +32,6 @@ def test_load_catalog_returns_exact_paths(tmp_path):
         "知识点@人文地理@标签二｜释义二",
     ]
     assert paths == {"知识点@自然地理@标签一", "知识点@人文地理@标签二"}
-
-
-def test_split_catalog_keeps_siblings_together_and_balances_parts():
-    catalog = "\n".join([
-        "知识点@自然地理@水@水循环｜释义0",
-        "知识点@自然地理@水@河流｜释义1",
-        "知识点@自然地理@大气@气候｜释义2",
-        "知识点@自然地理@大气@天气｜释义3",
-        "知识点@人文地理@农业@农业区位｜释义4",
-        "知识点@人文地理@农业@农业类型｜释义5",
-        "知识点@人文地理@工业@工业区位｜释义6",
-        "知识点@人文地理@工业@工业地域｜释义7",
-        "知识点@世界地理@亚洲@东亚｜释义8",
-        "知识点@世界地理@亚洲@东南亚｜释义9",
-        "知识点@世界地理@欧洲@西欧｜释义10",
-        "知识点@世界地理@欧洲@北欧｜释义11",
-    ])
-
-    parts = split_catalog(catalog, parts=3)
-
-    assert [len(paths) for _, paths in parts] == [4, 4, 4]
-    all_paths = [path for _, paths in parts for path in paths]
-    assert len(all_paths) == len(set(all_paths)) == 12
-
-    part_by_path = {
-        path: part_index
-        for part_index, (_, paths) in enumerate(parts)
-        for path in paths
-    }
-    sibling_pairs = [
-        ("知识点@自然地理@水@水循环", "知识点@自然地理@水@河流"),
-        ("知识点@自然地理@大气@气候", "知识点@自然地理@大气@天气"),
-        ("知识点@人文地理@农业@农业区位", "知识点@人文地理@农业@农业类型"),
-        ("知识点@人文地理@工业@工业区位", "知识点@人文地理@工业@工业地域"),
-        ("知识点@世界地理@亚洲@东亚", "知识点@世界地理@亚洲@东南亚"),
-        ("知识点@世界地理@欧洲@西欧", "知识点@世界地理@欧洲@北欧"),
-    ]
-    for first, second in sibling_pairs:
-        assert part_by_path[first] == part_by_path[second]
 
 
 def test_build_question_text_separates_context_and_excludes_existing_labels():
@@ -181,22 +140,29 @@ def test_validate_result_accepts_known_unique_labels():
     assert uncovered is None
 
 
-def test_normalize_shard_result_repairs_format_and_deduplicates():
+def test_normalize_pre_candidate_result_repairs_format_and_deduplicates():
     allowed = {"知识点@自然地理@地球仪", "知识点@自然地理@经纬网"}
 
-    labels = normalize_shard_result(
+    labels = normalize_pre_candidate_result(
         {
-            "candidate_labels": [
+            "pre_candidate_labels": [
                 "自然地理@地球仪",
                 "知识点@自然地理@地球仪｜标签释义",
                 "知识点@自然地理@经纬网",
-                "知识点@其他批次@标签",
             ]
         },
         allowed,
     )
 
     assert labels == ["知识点@自然地理@地球仪", "知识点@自然地理@经纬网"]
+
+
+def test_normalize_pre_candidate_result_rejects_unknown_label():
+    with pytest.raises(ValueError, match="目录外标签"):
+        normalize_pre_candidate_result(
+            {"pre_candidate_labels": ["知识点@不存在"]},
+            {"知识点@自然地理@地球仪"},
+        )
 
 
 def test_normalize_tagging_evidence_validates_unique_complete_items():
@@ -257,81 +223,52 @@ def test_normalize_match_result_keeps_clear_possible_and_multiple_evidence():
     ]
 
 
-def test_normalize_match_result_allows_more_than_twenty_shard_candidates():
+def test_normalize_match_result_rejects_more_than_twenty_candidates():
     allowed = {f"知识点@标签{i}" for i in range(21)}
 
-    labels, _ = normalize_match_result(
-        {
-            "candidates": [
-                {
-                    "label": label,
-                    "match_type": "clear",
-                    "evidence_ids": ["E1"],
-                }
-                for label in sorted(allowed)
-            ]
-        },
-        allowed,
-        {"E1"},
-    )
+    with pytest.raises(ValueError, match="最终候选超过20个"):
+        normalize_match_result(
+            {
+                "candidates": [
+                    {
+                        "label": label,
+                        "match_type": "clear",
+                        "evidence_ids": ["E1"],
+                    }
+                    for label in sorted(allowed)
+                ]
+            },
+            allowed,
+            {"E1"},
+        )
 
-    assert set(labels) == allowed
+
+def test_normalize_match_result_rejects_label_outside_pre_candidates():
+    with pytest.raises(ValueError, match="预候选外标签"):
+        normalize_match_result(
+            {
+                "candidates": [
+                    {
+                        "label": "知识点@标签二",
+                        "match_type": "possible",
+                        "evidence_ids": ["E1"],
+                    }
+                ]
+            },
+            {"知识点@标签一"},
+            {"E1"},
+        )
 
 
-def test_parse_or_recover_match_result_recovers_malformed_json():
-    allowed = {"知识点@自然地理@地球仪", "知识点@自然地理@经纬网"}
+def test_parse_json_object_rejects_malformed_candidate_json():
     broken = (
         '{"candidates":[{"label":"知识点@自然地理@地球仪",'
         '"match_type":"clear","evidence_ids":["E2"]},'
         '{"label":"知识点@自然地理@经纬网"'
     )
 
-    result = parse_or_recover_match_result(broken, allowed, {"E1", "E2"})
-
-    assert result == {
-        "candidates": [
-            {
-                "label": "知识点@自然地理@地球仪",
-                "match_type": "possible",
-                "evidence_ids": ["E2"],
-            },
-            {
-                "label": "知识点@自然地理@经纬网",
-                "match_type": "possible",
-                "evidence_ids": ["E2"],
-            },
-        ]
-    }
-
-
-def test_parse_or_recover_result_recovers_labels_from_broken_json():
-    allowed = {
-        "知识点@自然地理@地球仪",
-        "知识点@自然地理@地球仪@经纬网",
-        "知识点@人文地理@人口",
-    }
-    broken = (
-        '{"candidate_labels":["自然地理@地球仪@经纬网",'
-        '"知识点@人文地理@人口" "unexpected"]}'
-    )
-
-    result = parse_or_recover_result(broken, allowed)
-
-    assert result == {
-        "candidate_labels": [
-            "知识点@自然地理@地球仪@经纬网",
-            "知识点@人文地理@人口",
-        ]
-    }
-
-
-def test_parse_or_recover_result_rejects_truncated_json():
-    allowed = {"知识点@自然地理@地球仪"}
-
     with pytest.raises(json.JSONDecodeError):
-        parse_or_recover_result(
-            '{"candidate_labels":["知识点@自然地理@地球仪"', allowed
-        )
+        parse_json_object(broken)
 
 
 @pytest.mark.parametrize(
@@ -352,7 +289,7 @@ def test_validate_result_rejects_invalid_candidates(candidate_labels):
         )
 
 
-def test_trace_records_each_shard_and_resume(monkeypatch, tmp_path):
+def test_trace_records_global_and_final_candidates_and_resume(monkeypatch, tmp_path):
     labels = [f"知识点@分类{i}@标签{i}" for i in range(3)]
     catalog = "\n".join(
         f"{label}｜释义{index}" for index, label in enumerate(labels)
@@ -361,7 +298,7 @@ def test_trace_records_each_shard_and_resume(monkeypatch, tmp_path):
     output = tmp_path / "candidates.jsonl"
     trace_output = tmp_path / "trace.jsonl"
 
-    def fake_request(self, system_prompt, question_text):
+    def fake_request(self, system_prompt, question_text, max_tokens=2048):
         if system_prompt == EVIDENCE_PROMPT:
             return json.dumps(
                 {
@@ -375,16 +312,15 @@ def test_trace_records_each_shard_and_resume(monkeypatch, tmp_path):
                 },
                 ensure_ascii=False,
             )
-        label = next(
-            line.split("｜", 1)[0]
-            for line in system_prompt.splitlines()
-            if line.startswith("知识点@")
-        )
+        if "全局标签预召回" in system_prompt:
+            return json.dumps(
+                {"pre_candidate_labels": labels}, ensure_ascii=False
+            )
         return json.dumps(
             {
                 "candidates": [
                     {
-                        "label": label,
+                        "label": labels[0],
                         "match_type": "clear",
                         "evidence_ids": ["E1"],
                     }
@@ -406,13 +342,20 @@ def test_trace_records_each_shard_and_resume(monkeypatch, tmp_path):
     assert first["completed"] == 1
     assert second["completed"] == 0
     assert len(output.read_text(encoding="utf-8").splitlines()) == 1
-    traces = [json.loads(line) for line in trace_output.read_text(encoding="utf-8").splitlines()]
-    assert len(traces) == 1
-    assert traces[0]["shard_candidate_labels"] == [
-        [labels[0]], [labels[1]], [labels[2]]
+    traces = [
+        json.loads(line)
+        for line in trace_output.read_text(encoding="utf-8").splitlines()
     ]
-    assert traces[0]["before_consolidation"] == traces[0]["candidate_labels"]
-    assert traces[0]["consolidation_used"] is False
+    assert len(traces) == 1
+    assert traces[0]["global_pre_candidate_labels"] == labels
+    assert traces[0]["candidate_labels"] == [labels[0]]
+    assert traces[0]["final_candidate_matches"] == [
+        {
+            "label": labels[0],
+            "match_type": "clear",
+            "evidence_ids": ["E1"],
+        }
+    ]
     assert traces[0]["uncovered_evidence"] == []
 
 
@@ -475,7 +418,7 @@ def test_run_retrieval_shares_work_across_multiple_endpoints(monkeypatch, tmp_pa
     output = tmp_path / "candidates.jsonl"
     barrier = threading.Barrier(2)
 
-    def fake_request(self, system_prompt, question_text):
+    def fake_request(self, system_prompt, question_text, max_tokens=2048):
         if system_prompt == EVIDENCE_PROMPT:
             barrier.wait(timeout=2)
             return json.dumps(
@@ -490,16 +433,15 @@ def test_run_retrieval_shares_work_across_multiple_endpoints(monkeypatch, tmp_pa
                 },
                 ensure_ascii=False,
             )
-        label = next(
-            line.split("｜", 1)[0]
-            for line in system_prompt.splitlines()
-            if line.startswith("知识点@")
-        )
+        if "全局标签预召回" in system_prompt:
+            return json.dumps(
+                {"pre_candidate_labels": labels}, ensure_ascii=False
+            )
         return json.dumps(
             {
                 "candidates": [
                     {
-                        "label": label,
+                        "label": labels[0],
                         "match_type": "clear",
                         "evidence_ids": ["E1"],
                     }
@@ -535,11 +477,12 @@ def test_run_retrieval_shares_work_across_multiple_endpoints(monkeypatch, tmp_pa
 
 def test_retrieve_records_uncovered_evidence_without_recovery(monkeypatch):
     labels = [f"知识点@分类{i}@标签{i}" for i in range(3)]
-    catalog_parts = [
-        (f"{label}｜释义{i}", {label}) for i, label in enumerate(labels)
-    ]
+    catalog = "\n".join(
+        f"{label}｜释义{i}" for i, label in enumerate(labels)
+    )
     retriever = DeepSeekCandidateRetriever(
-        catalog_parts,
+        catalog,
+        set(labels),
         "test-model",
         "http://example.test/v1",
         None,
@@ -548,7 +491,7 @@ def test_retrieve_records_uncovered_evidence_without_recovery(monkeypatch):
 
     request_count = 0
 
-    def fake_request(self, system_prompt, question_text):
+    def fake_request(self, system_prompt, question_text, max_tokens=2048):
         nonlocal request_count
         request_count += 1
         if system_prompt == EVIDENCE_PROMPT:
@@ -569,21 +512,22 @@ def test_retrieve_records_uncovered_evidence_without_recovery(monkeypatch):
                 },
                 ensure_ascii=False,
             )
-        label = next(
-            line.split("｜", 1)[0]
-            for line in system_prompt.splitlines()
-            if line.startswith("知识点@")
+        if "全局标签预召回" in system_prompt:
+            return json.dumps(
+                {"pre_candidate_labels": labels}, ensure_ascii=False
+            )
+        return json.dumps(
+            {
+                "candidates": [
+                    {
+                        "label": labels[0],
+                        "match_type": "clear",
+                        "evidence_ids": ["E1"],
+                    }
+                ]
+            },
+            ensure_ascii=False,
         )
-        matches = []
-        if label == labels[0]:
-            matches = [
-                {
-                    "label": label,
-                    "match_type": "clear",
-                    "evidence_ids": ["E1"],
-                }
-            ]
-        return json.dumps({"candidates": matches}, ensure_ascii=False)
 
     monkeypatch.setattr(DeepSeekCandidateRetriever, "request", fake_request)
 
@@ -595,14 +539,50 @@ def test_retrieve_records_uncovered_evidence_without_recovery(monkeypatch):
     assert [item["evidence_id"] for item in trace["uncovered_evidence"]] == [
         "E2"
     ]
-    assert request_count == 4
+    assert request_count == 3
 
 
-def test_consolidation_requires_exactly_twenty_labels(monkeypatch):
+def test_retrieve_rejects_malformed_global_json(monkeypatch):
+    label = "知识点@自然地理@标签"
+    retriever = DeepSeekCandidateRetriever(
+        f"{label}｜释义",
+        {label},
+        "test-model",
+        "http://example.test/v1",
+        None,
+        10.0,
+    )
+
+    def fake_request(self, system_prompt, question_text, max_tokens=2048):
+        if system_prompt == EVIDENCE_PROMPT:
+            return json.dumps(
+                {
+                    "tagging_evidence": [
+                        {
+                            "evidence_id": "E1",
+                            "question_part": "普通题",
+                            "content": "依据",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        return '{"pre_candidate_labels":["知识点@自然地理@标签"'
+
+    monkeypatch.setattr(DeepSeekCandidateRetriever, "request", fake_request)
+
+    with pytest.raises(json.JSONDecodeError):
+        retriever.retrieve(
+            {"question_id": "q1", "stem": "题目", "sub_questions": []}
+        )
+
+
+def test_final_selection_allows_fewer_than_twenty_labels(monkeypatch):
     labels = [f"知识点@分类@标签{i}" for i in range(21)]
     catalog = "\n".join(f"{label}｜释义{i}" for i, label in enumerate(labels))
     retriever = DeepSeekCandidateRetriever(
-        [(catalog, set(labels))],
+        catalog,
+        set(labels),
         "test-model",
         "http://example.test/v1",
         None,
@@ -611,26 +591,27 @@ def test_consolidation_requires_exactly_twenty_labels(monkeypatch):
     tagging_evidence = [
         {"evidence_id": "E1", "question_part": "普通题", "content": "依据"}
     ]
-    evidence = {
-        label: {"match_type": "clear", "evidence_ids": ["E1"]}
-        for label in labels
-    }
 
     monkeypatch.setattr(
         DeepSeekCandidateRetriever,
         "request",
-        lambda self, system_prompt, question_text: json.dumps(
-            {"candidate_labels": labels[:19]}, ensure_ascii=False
+        lambda self, system_prompt, question_text, max_tokens=2048: json.dumps(
+            {
+                "candidates": [
+                    {
+                        "label": label,
+                        "match_type": "clear",
+                        "evidence_ids": ["E1"],
+                    }
+                    for label in labels[:3]
+                ]
+            },
+            ensure_ascii=False,
         ),
     )
-    with pytest.raises(ValueError, match="必须恰好20个"):
-        retriever.consolidate("题目", labels, tagging_evidence, evidence)
+    selected, matches = retriever.select_final_candidates(
+        "题目", labels, tagging_evidence
+    )
 
-    monkeypatch.setattr(
-        DeepSeekCandidateRetriever,
-        "request",
-        lambda self, system_prompt, question_text: json.dumps(
-            {"candidate_labels": labels[:20]}, ensure_ascii=False
-        ),
-    )
-    assert retriever.consolidate("题目", labels, tagging_evidence, evidence) == labels[:20]
+    assert selected == labels[:3]
+    assert len(matches) == 3
