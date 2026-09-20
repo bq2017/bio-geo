@@ -148,32 +148,58 @@ def test_normalize_pre_candidate_result_maps_keys_and_deduplicates():
         "L002": "知识点@自然地理@经纬网",
     }
 
-    labels, rejected = normalize_pre_candidate_result(
+    labels, matches, rejected = normalize_pre_candidate_result(
         {
-            "pre_candidate_keys": ["L001", "l001｜附加内容", "L002"]
+            "pre_candidates": [
+                {"candidate_key": "L001", "evidence_ids": ["E1"]},
+                {"candidate_key": "l001｜附加内容", "evidence_ids": ["E2"]},
+                {"candidate_key": "L002", "evidence_ids": ["E2"]},
+            ]
         },
         key_to_label,
+        {"E1", "E2"},
     )
 
     assert labels == ["知识点@自然地理@地球仪", "知识点@自然地理@经纬网"]
+    assert matches == [
+        {
+            "label": "知识点@自然地理@地球仪",
+            "evidence_ids": ["E1", "E2"],
+        },
+        {"label": "知识点@自然地理@经纬网", "evidence_ids": ["E2"]},
+    ]
     assert rejected == []
 
 
 def test_normalize_pre_candidate_result_rejects_only_unknown_keys():
     with pytest.raises(ValueError, match="任何有效临时序号"):
         normalize_pre_candidate_result(
-            {"pre_candidate_keys": ["L999"]},
+            {
+                "pre_candidates": [
+                    {"candidate_key": "L999", "evidence_ids": ["E1"]}
+                ]
+            },
             {"L001": "知识点@自然地理@地球仪"},
+            {"E1"},
         )
 
 
 def test_normalize_pre_candidate_result_keeps_valid_and_records_unknown_keys():
-    labels, rejected = normalize_pre_candidate_result(
-        {"pre_candidate_keys": ["L001", "L999"]},
+    labels, matches, rejected = normalize_pre_candidate_result(
+        {
+            "pre_candidates": [
+                {"candidate_key": "L001", "evidence_ids": ["E1"]},
+                {"candidate_key": "L999", "evidence_ids": ["E1"]},
+            ]
+        },
         {"L001": "知识点@自然地理@地球仪"},
+        {"E1"},
     )
 
     assert labels == ["知识点@自然地理@地球仪"]
+    assert matches == [
+        {"label": "知识点@自然地理@地球仪", "evidence_ids": ["E1"]}
+    ]
     assert rejected == ["L999"]
 
 
@@ -183,17 +209,50 @@ def test_normalize_pre_candidate_result_allows_one_hundred_but_rejects_more():
         for index in range(1, 102)
     }
 
-    labels, rejected = normalize_pre_candidate_result(
-        {"pre_candidate_keys": list(key_to_label)[:100]},
+    candidates = [
+        {"candidate_key": key, "evidence_ids": ["E1"]}
+        for key in key_to_label
+    ]
+    labels, matches, rejected = normalize_pre_candidate_result(
+        {"pre_candidates": candidates[:100]},
         key_to_label,
+        {"E1"},
     )
 
     assert len(labels) == 100
+    assert len(matches) == 100
     assert rejected == []
     with pytest.raises(ValueError, match="超过100个"):
         normalize_pre_candidate_result(
-            {"pre_candidate_keys": list(key_to_label)},
+            {"pre_candidates": candidates},
             key_to_label,
+            {"E1"},
+        )
+
+
+def test_normalize_pre_candidate_result_requires_evidence():
+    with pytest.raises(ValueError, match="非空evidence_ids"):
+        normalize_pre_candidate_result(
+            {
+                "pre_candidates": [
+                    {"candidate_key": "L001", "evidence_ids": []}
+                ]
+            },
+            {"L001": "知识点@自然地理@地球仪"},
+            {"E1"},
+        )
+
+
+def test_normalize_pre_candidate_result_rejects_unknown_evidence():
+    with pytest.raises(ValueError, match="不存在的标注依据"):
+        normalize_pre_candidate_result(
+            {
+                "pre_candidates": [
+                    {"candidate_key": "L001", "evidence_ids": ["E9"]}
+                ]
+            },
+            {"L001": "知识点@自然地理@地球仪"},
+            {"E1"},
         )
 
 
@@ -370,7 +429,12 @@ def test_trace_records_global_and_final_candidates_and_resume(monkeypatch, tmp_p
             )
         if "全局标签预召回" in system_prompt:
             return json.dumps(
-                {"pre_candidate_keys": keys},
+                {
+                    "pre_candidates": [
+                        {"candidate_key": key, "evidence_ids": ["E1"]}
+                        for key in keys
+                    ]
+                },
                 ensure_ascii=False,
             )
         return json.dumps(
@@ -405,6 +469,10 @@ def test_trace_records_global_and_final_candidates_and_resume(monkeypatch, tmp_p
     ]
     assert len(traces) == 1
     assert traces[0]["global_pre_candidate_labels"] == labels
+    assert traces[0]["global_pre_candidate_matches"] == [
+        {"label": label, "evidence_ids": ["E1"]}
+        for label in labels
+    ]
     assert traces[0]["rejected_global_candidate_keys"] == []
     assert traces[0]["candidate_labels"] == [labels[0]]
     assert traces[0]["final_candidate_matches"] == [
@@ -495,7 +563,12 @@ def test_run_retrieval_shares_work_across_multiple_endpoints(monkeypatch, tmp_pa
             )
         if "全局标签预召回" in system_prompt:
             return json.dumps(
-                {"pre_candidate_keys": keys},
+                {
+                    "pre_candidates": [
+                        {"candidate_key": key, "evidence_ids": ["E1"]}
+                        for key in keys
+                    ]
+                },
                 ensure_ascii=False,
             )
         return json.dumps(
@@ -575,7 +648,12 @@ def test_retrieve_records_uncovered_evidence_without_recovery(monkeypatch):
             )
         if "全局标签预召回" in system_prompt:
             return json.dumps(
-                {"pre_candidate_keys": keys},
+                {
+                    "pre_candidates": [
+                        {"candidate_key": key, "evidence_ids": ["E1"]}
+                        for key in keys
+                    ]
+                },
                 ensure_ascii=False,
             )
         return json.dumps(
@@ -628,7 +706,7 @@ def test_retrieve_rejects_malformed_global_json(monkeypatch):
                 },
                 ensure_ascii=False,
             )
-        return '{"pre_candidate_keys":["L001"'
+        return '{"pre_candidates":[{"candidate_key":"L001"'
 
     monkeypatch.setattr(DeepSeekCandidateRetriever, "request", fake_request)
 
@@ -643,7 +721,7 @@ def test_run_retrieval_saves_stage_and_raw_failed_response(monkeypatch, tmp_path
     unit = {"question_id": "q1", "stem": "题目"}
     output = tmp_path / "candidates.jsonl"
     failure_trace = tmp_path / "failures.jsonl"
-    broken = '{"pre_candidate_keys":["K12345678"'
+    broken = '{"pre_candidates":[{"candidate_key":"K12345678"'
 
     def fake_request(self, system_prompt, question_text, max_tokens=2048):
         if system_prompt == EVIDENCE_PROMPT:
