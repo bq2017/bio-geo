@@ -5,10 +5,12 @@ import pytest
 from bio_geo_tagging.call1_candidate_retrieval import (
     DeepSeekCandidateRetriever,
     EVIDENCE_PROMPT,
+    StageResponseError,
     build_question_text,
     get_input_role,
     load_catalog,
     load_units,
+    make_label_key,
     normalize_match_result,
     normalize_pre_candidate_result,
     normalize_tagging_evidence,
@@ -344,6 +346,7 @@ def test_validate_result_rejects_invalid_candidates(candidate_labels):
 
 def test_trace_records_global_and_final_candidates_and_resume(monkeypatch, tmp_path):
     labels = [f"知识点@分类{i}@标签{i}" for i in range(3)]
+    keys = [make_label_key(label) for label in labels]
     catalog = "\n".join(
         f"{label}｜释义{index}" for index, label in enumerate(labels)
     )
@@ -367,14 +370,14 @@ def test_trace_records_global_and_final_candidates_and_resume(monkeypatch, tmp_p
             )
         if "全局标签预召回" in system_prompt:
             return json.dumps(
-                {"pre_candidate_keys": ["L001", "L002", "L003"]},
+                {"pre_candidate_keys": keys},
                 ensure_ascii=False,
             )
         return json.dumps(
             {
                 "candidates": [
                     {
-                        "candidate_key": "C001",
+                        "candidate_key": keys[0],
                         "match_type": "clear",
                         "evidence_ids": ["E1"],
                     }
@@ -463,6 +466,7 @@ def test_run_retrieval_shares_work_across_multiple_endpoints(monkeypatch, tmp_pa
     import threading
 
     labels = [f"知识点@分类{i}@标签{i}" for i in range(3)]
+    keys = [make_label_key(label) for label in labels]
     catalog = "\n".join(
         f"{label}｜释义{index}" for index, label in enumerate(labels)
     )
@@ -491,14 +495,14 @@ def test_run_retrieval_shares_work_across_multiple_endpoints(monkeypatch, tmp_pa
             )
         if "全局标签预召回" in system_prompt:
             return json.dumps(
-                {"pre_candidate_keys": ["L001", "L002", "L003"]},
+                {"pre_candidate_keys": keys},
                 ensure_ascii=False,
             )
         return json.dumps(
             {
                 "candidates": [
                     {
-                        "candidate_key": "C001",
+                        "candidate_key": keys[0],
                         "match_type": "clear",
                         "evidence_ids": ["E1"],
                     }
@@ -534,6 +538,7 @@ def test_run_retrieval_shares_work_across_multiple_endpoints(monkeypatch, tmp_pa
 
 def test_retrieve_records_uncovered_evidence_without_recovery(monkeypatch):
     labels = [f"知识点@分类{i}@标签{i}" for i in range(3)]
+    keys = [make_label_key(label) for label in labels]
     catalog = "\n".join(
         f"{label}｜释义{i}" for i, label in enumerate(labels)
     )
@@ -570,14 +575,14 @@ def test_retrieve_records_uncovered_evidence_without_recovery(monkeypatch):
             )
         if "全局标签预召回" in system_prompt:
             return json.dumps(
-                {"pre_candidate_keys": ["L001", "L002", "L003"]},
+                {"pre_candidate_keys": keys},
                 ensure_ascii=False,
             )
         return json.dumps(
             {
                 "candidates": [
                     {
-                        "candidate_key": "C001",
+                        "candidate_key": keys[0],
                         "match_type": "clear",
                         "evidence_ids": ["E1"],
                     }
@@ -627,14 +632,62 @@ def test_retrieve_rejects_malformed_global_json(monkeypatch):
 
     monkeypatch.setattr(DeepSeekCandidateRetriever, "request", fake_request)
 
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises(StageResponseError, match="全局预召回阶段"):
         retriever.retrieve(
             {"question_id": "q1", "stem": "题目", "sub_questions": []}
         )
 
 
+def test_run_retrieval_saves_stage_and_raw_failed_response(monkeypatch, tmp_path):
+    label = "知识点@自然地理@标签"
+    unit = {"question_id": "q1", "stem": "题目"}
+    output = tmp_path / "candidates.jsonl"
+    failure_trace = tmp_path / "failures.jsonl"
+    broken = '{"pre_candidate_keys":["K12345678"'
+
+    def fake_request(self, system_prompt, question_text, max_tokens=2048):
+        if system_prompt == EVIDENCE_PROMPT:
+            return json.dumps(
+                {
+                    "tagging_evidence": [
+                        {
+                            "evidence_id": "E1",
+                            "question_part": "普通题",
+                            "content": "依据",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        return broken
+
+    monkeypatch.setattr(DeepSeekCandidateRetriever, "request", fake_request)
+
+    summary = run_retrieval(
+        [unit],
+        f"{label}｜释义",
+        {label},
+        output,
+        "test-model",
+        "http://example.test/v1",
+        None,
+        1,
+        1,
+        10.0,
+        None,
+        failure_trace_output=failure_trace,
+    )
+
+    failure = json.loads(failure_trace.read_text(encoding="utf-8"))
+    assert summary["errors"] == 1
+    assert failure["status"] == "failed"
+    assert failure["attempts"][0]["stage"] == "全局预召回"
+    assert failure["attempts"][0]["raw_response"] == broken
+
+
 def test_final_selection_allows_fewer_than_twenty_labels(monkeypatch):
     labels = [f"知识点@分类@标签{i}" for i in range(21)]
+    keys = [make_label_key(label) for label in labels]
     catalog = "\n".join(f"{label}｜释义{i}" for i, label in enumerate(labels))
     retriever = DeepSeekCandidateRetriever(
         catalog,
@@ -654,7 +707,7 @@ def test_final_selection_allows_fewer_than_twenty_labels(monkeypatch):
             {
                 "candidates": [
                     {
-                        "candidate_key": f"C{i + 1:03d}",
+                            "candidate_key": keys[i],
                         "match_type": "clear",
                         "evidence_ids": ["E1"],
                     }

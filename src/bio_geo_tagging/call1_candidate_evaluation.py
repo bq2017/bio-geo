@@ -121,10 +121,110 @@ def _insert_candidates(
         raise ValueError("候选文件存在重复unit_key") from error
 
 
+def load_pre_candidates_to_db(
+    connection: sqlite3.Connection,
+    trace_path: Path,
+    allowed_paths: set[str],
+) -> int:
+    count = 0
+    rows: list[tuple[str, str]] = []
+    for line_number, record in read_jsonl(trace_path):
+        unit_key = as_text(record.get("unit_key"))
+        labels = record.get("global_pre_candidate_labels")
+        if not unit_key:
+            raise ValueError(f"trace文件第{line_number}行缺少unit_key")
+        if not isinstance(labels, list) or not all(
+            isinstance(label, str) for label in labels
+        ):
+            raise ValueError(
+                f"trace文件第{line_number}行缺少global_pre_candidate_labels"
+            )
+        labels = list(dict.fromkeys(label.strip() for label in labels))
+        unknown = [label for label in labels if label not in allowed_paths]
+        if unknown:
+            raise ValueError(
+                f"trace文件第{line_number}行含目录外预候选：{unknown}"
+            )
+        rows.append((unit_key, json.dumps(labels, ensure_ascii=False)))
+        count += 1
+        if len(rows) == 10_000:
+            _insert_pre_candidates(connection, rows)
+            rows.clear()
+    if rows:
+        _insert_pre_candidates(connection, rows)
+    connection.commit()
+    return count
+
+
+def _insert_pre_candidates(
+    connection: sqlite3.Connection, rows: list[tuple[str, str]]
+) -> None:
+    try:
+        connection.executemany("INSERT INTO pre_candidates VALUES (?, ?)", rows)
+    except sqlite3.IntegrityError as error:
+        raise ValueError("trace文件存在重复unit_key") from error
+
+
 def safe_rate(numerator: int, denominator: int) -> float | None:
     if denominator == 0:
         return None
     return round(numerator / denominator, 6)
+
+
+def evaluate_global_pre_recall(
+    connection: sqlite3.Connection,
+    allowed_paths: set[str],
+) -> dict[str, Any]:
+    evaluated_units = 0
+    units_with_known_gold = 0
+    fully_covered_units = 0
+    known_gold_labels = 0
+    recalled_gold_labels = 0
+    candidate_sizes: list[int] = []
+    missing_counts: Counter[str] = Counter()
+
+    query = """
+        SELECT u.knw_labels, p.candidate_labels
+        FROM units AS u
+        JOIN candidates AS c ON c.unit_key = u.unit_key
+        JOIN pre_candidates AS p ON p.unit_key = u.unit_key
+        ORDER BY u.rowid
+    """
+    for gold_json, candidate_json in connection.execute(query):
+        gold = [
+            label for label in json.loads(gold_json) if label in allowed_paths
+        ]
+        candidates = json.loads(candidate_json)
+        candidate_set = set(candidates)
+        missing = [label for label in gold if label not in candidate_set]
+        evaluated_units += 1
+        candidate_sizes.append(len(candidates))
+        if gold:
+            units_with_known_gold += 1
+            known_gold_labels += len(gold)
+            recalled_gold_labels += len(gold) - len(missing)
+            if not missing:
+                fully_covered_units += 1
+            else:
+                missing_counts.update(missing)
+
+    return {
+        "evaluated_units": evaluated_units,
+        "units_with_known_gold": units_with_known_gold,
+        "fully_covered_units": fully_covered_units,
+        "full_coverage_rate": safe_rate(
+            fully_covered_units, units_with_known_gold
+        ),
+        "known_gold_labels": known_gold_labels,
+        "recalled_gold_labels": recalled_gold_labels,
+        "label_recall": safe_rate(recalled_gold_labels, known_gold_labels),
+        "candidate_count": {
+            "average": safe_rate(sum(candidate_sizes), len(candidate_sizes)),
+            "minimum": min(candidate_sizes) if candidate_sizes else None,
+            "maximum": max(candidate_sizes) if candidate_sizes else None,
+        },
+        "missing_label_counts": dict(missing_counts.most_common()),
+    }
 
 
 def new_role_stats() -> dict[str, int]:
@@ -398,6 +498,7 @@ def evaluate_files(
     summary_output: Path,
     missing_output: Path,
     group_by_root: bool = False,
+    trace_path: Path | None = None,
 ) -> dict[str, Any]:
     _, allowed_paths = load_catalog(catalog_path)
     with tempfile.TemporaryDirectory(prefix="call1-evaluation-") as temp_dir:
@@ -421,12 +522,23 @@ def evaluate_files(
                     candidate_labels TEXT
                 )"""
             )
+            connection.execute(
+                """CREATE TABLE pre_candidates (
+                    unit_key TEXT PRIMARY KEY,
+                    candidate_labels TEXT
+                )"""
+            )
             eligible_units, skipped_empty_stem = load_units_to_db(
                 connection, input_path
             )
             completed_candidate_units = load_candidates_to_db(
                 connection, candidates_path, allowed_paths
             )
+            pre_candidate_units = None
+            if trace_path is not None:
+                pre_candidate_units = load_pre_candidates_to_db(
+                    connection, trace_path, allowed_paths
+                )
             stale_candidates = connection.execute(
                 """SELECT COUNT(*) FROM candidates AS c
                    LEFT JOIN units AS u ON u.unit_key = c.unit_key
@@ -435,6 +547,11 @@ def evaluate_files(
             if stale_candidates:
                 raise ValueError(
                     f"候选文件中有{stale_candidates}条记录不属于当前题目文件"
+                )
+            global_pre_recall = None
+            if trace_path is not None:
+                global_pre_recall = evaluate_global_pre_recall(
+                    connection, allowed_paths
                 )
             if group_by_root:
                 summary = evaluate_grouped_records(
@@ -456,6 +573,9 @@ def evaluate_files(
         "evaluation_grain": "question_group" if group_by_root else "tagging_unit",
         **summary,
     }
+    if trace_path is not None:
+        summary["global_pre_candidate_units"] = pre_candidate_units
+        summary["global_pre_recall"] = global_pre_recall
     summary_output.parent.mkdir(parents=True, exist_ok=True)
     summary_output.write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
@@ -473,6 +593,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--catalog", type=Path, required=True)
     parser.add_argument("--summary-output", type=Path, required=True)
     parser.add_argument("--missing-output", type=Path, required=True)
+    parser.add_argument("--trace", type=Path)
     parser.add_argument("--group-by-root", action="store_true")
     return parser
 
@@ -486,6 +607,7 @@ def main() -> None:
         args.summary_output,
         args.missing_output,
         args.group_by_root,
+        args.trace,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 

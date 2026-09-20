@@ -86,13 +86,43 @@ def test_evaluate_files_uses_known_knw_labels_and_reports_unmapped(tmp_path):
     ]
     input_path = tmp_path / "units.jsonl"
     candidates_path = tmp_path / "candidates.jsonl"
+    trace_path = tmp_path / "trace.jsonl"
     summary_path = tmp_path / "summary.json"
     missing_path = tmp_path / "missing.jsonl"
     write_jsonl(input_path, units)
     write_jsonl(candidates_path, candidates)
+    write_jsonl(
+        trace_path,
+        [
+            {
+                "unit_key": "q1|q1|root",
+                "global_pre_candidate_labels": [
+                    "知识点@标签0",
+                    "知识点@标签1",
+                ],
+            },
+            {
+                "unit_key": "q1|q2|subquestion",
+                "global_pre_candidate_labels": ["知识点@标签2"],
+            },
+            {
+                "unit_key": "q3|q3|root",
+                "global_pre_candidate_labels": [],
+            },
+            {
+                "unit_key": "q4|q4|root",
+                "global_pre_candidate_labels": ["知识点@标签0"],
+            },
+        ],
+    )
 
     summary = evaluate_files(
-        input_path, candidates_path, catalog, summary_path, missing_path
+        input_path,
+        candidates_path,
+        catalog,
+        summary_path,
+        missing_path,
+        trace_path=trace_path,
     )
 
     assert summary["eligible_input_units"] == 4
@@ -109,6 +139,11 @@ def test_evaluate_files_uses_known_knw_labels_and_reports_unmapped(tmp_path):
     assert summary["units_with_unmapped_knw_labels"] == 1
     assert summary["missing_label_counts"] == {"知识点@标签1": 1}
     assert summary["unmapped_knw_label_counts"] == {"知识点@旧标签": 1}
+    assert summary["global_pre_candidate_units"] == 4
+    assert summary["global_pre_recall"]["fully_covered_units"] == 2
+    assert summary["global_pre_recall"]["full_coverage_rate"] == 1.0
+    assert summary["global_pre_recall"]["recalled_gold_labels"] == 3
+    assert summary["global_pre_recall"]["label_recall"] == 1.0
 
     details = [json.loads(line) for line in missing_path.read_text(encoding="utf-8").splitlines()]
     assert [detail["unit_key"] for detail in details] == [

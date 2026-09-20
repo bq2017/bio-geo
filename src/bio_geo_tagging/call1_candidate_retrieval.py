@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -18,7 +19,7 @@ from tqdm import tqdm
 DEFAULT_MODEL = "DeepSeek-V4-Flash"
 DEFAULT_BASE_URL = "http://172.22.0.35:9204/v1"
 EXPECTED_LABEL_COUNT = 414
-PIPELINE_VERSION = "global-key-v2"
+PIPELINE_VERSION = "global-opaque-key-v3"
 MAX_PRE_CANDIDATES = 100
 
 EVIDENCE_PROMPT = """你负责整理高中地理题目中可用于知识点标签判断的标注依据。本步骤只整理原题信息，不选择知识点标签。
@@ -70,7 +71,7 @@ GLOBAL_RETRIEVAL_PROMPT = """你负责为高中地理题目进行全局标签预
 预候选最多100个，不要求凑满。只能输出目录中存在的临时序号，不要重新书写标签路径，不要输出判断理由或其他内容。
 
 只输出JSON对象：
-{"pre_candidate_keys":["L001","L002"]}
+{"pre_candidate_keys":["K8F3A2D1","K19C7E40"]}
 
 【标注依据】
 {tagging_evidence}
@@ -87,13 +88,15 @@ FINAL_SELECTION_PROMPT = """你负责从全局预召回结果中选择高中地�
 
 第一步，阅读标签释义，明确标签描述的知识、过程、区域、对象、主题、案例或综合范围。
 
-第二步，在完整原题和标注依据中寻找支持。支持可以来自某个小题，也可以来自公共材料实际展开的内容，或者来自公共材料与多个小题共同形成的完整题目内容。
+第二步，逐个检查每个预候选，在完整原题和标注依据中寻找支持。支持可以来自某个小题，也可以来自公共材料实际展开的内容，或者来自公共材料与多个小题共同形成的完整题目内容。每个标签独立判断，不能因为另一个标签更具体、更概括或更熟悉，就跳过当前标签。
 
 第三步，判断标签与题目的关系：
 
 1. 明确匹配：原题提供了直接、充分的依据，标签释义清楚覆盖题目的实际内容，match_type设为clear。
-2. 可能匹配：原题已经提供与标签关键语义直接相关的具体内容，使其具有成为最终标签的合理可能，但仍需要下一次调用结合边界决定是否保留，match_type设为possible。
-3. 不匹配：标签与题目没有实际联系，或者只有同类、层级、词语和一般背景上的联系，不输出。
+2. 可能匹配：原题已经提供与标签关键语义直接相关的具体内容，使其具有成为最终标签的合理可能，但标签边界、范围或考查程度仍需下一次调用确认，match_type设为possible。
+3. 不匹配：根据原题信息和标签释义，可以明确判断该标签不可能成为本题最终标签。不匹配包括标签描述的内容未在原题中出现，或者只有同类、层级、词语和一般背景上的联系。不输出。
+
+本阶段漏掉合理候选的代价高于保留少量可能候选。只有能够明确判定为不匹配时才删除；存在具体依据但不能确认是否最终命中时，保留为possible。
 
 区域或对象标签：当该区域或对象是题目的主要研究范围，并且题目实际展开了其地理内容时，可以保留；不能因为同时存在气候、农业、工业等具体标签就排除区域标签。
 
@@ -106,7 +109,7 @@ FINAL_SELECTION_PROMPT = """你负责从全局预召回结果中选择高中地�
 最终候选最多20个，可以少于20个，也可以为空，不要凑满。只能返回预候选目录中的临时序号，不要重新书写标签路径。
 
 只输出JSON对象：
-{"candidates":[{"candidate_key":"C001","match_type":"clear","evidence_ids":["E1","E2"]},{"candidate_key":"C002","match_type":"possible","evidence_ids":["E3"]}]}
+{"candidates":[{"candidate_key":"K8F3A2D1","match_type":"clear","evidence_ids":["E1","E2"]},{"candidate_key":"K19C7E40","match_type":"possible","evidence_ids":["E3"]}]}
 
 【标注依据】
 {tagging_evidence}
@@ -114,6 +117,34 @@ FINAL_SELECTION_PROMPT = """你负责从全局预召回结果中选择高中地�
 【预候选标签及简明释义】
 {candidate_catalog}
 """
+
+
+class StageResponseError(ValueError):
+    def __init__(self, stage: str, raw_response: str, error: Exception) -> None:
+        super().__init__(f"{stage}阶段处理失败：{error}")
+        self.stage = stage
+        self.raw_response = raw_response
+        self.original_error = error
+
+
+class UnitRetrievalError(RuntimeError):
+    def __init__(
+        self,
+        unit_key: str,
+        endpoint: str,
+        attempts: list[dict[str, Any]],
+    ) -> None:
+        super().__init__(f"题目{unit_key}调用失败")
+        self.unit_key = unit_key
+        self.endpoint = endpoint
+        self.attempts = attempts
+
+
+def make_label_key(label_path: str) -> str:
+    digest = hashlib.blake2s(
+        label_path.encode("utf-8"), digest_size=4
+    ).hexdigest().upper()
+    return f"K{digest}"
 
 
 def as_text(value: Any) -> str:
@@ -470,8 +501,12 @@ class DeepSeekCandidateRetriever:
             for line in catalog.splitlines()
         }
         self.global_key_to_label = {
-            f"L{index:03d}": label
-            for index, label in enumerate(self.catalog_lines, start=1)
+            make_label_key(label): label for label in self.catalog_lines
+        }
+        if len(self.global_key_to_label) != len(self.catalog_lines):
+            raise ValueError("标签临时编码发生碰撞")
+        self.label_to_key = {
+            label: key for key, label in self.global_key_to_label.items()
         }
         self.label_paths = "\n".join(
             f"{key}｜{label}"
@@ -511,8 +546,13 @@ class DeepSeekCandidateRetriever:
     def extract_tagging_evidence(self, question_text: str) -> list[dict[str, str]]:
         content = self.request(EVIDENCE_PROMPT, question_text)
         if not content.strip():
-            raise ValueError("标注依据整理返回空内容")
-        return normalize_tagging_evidence(parse_json_object(content))
+            raise StageResponseError(
+                "标注依据", content, ValueError("返回空内容")
+            )
+        try:
+            return normalize_tagging_evidence(parse_json_object(content))
+        except Exception as error:
+            raise StageResponseError("标注依据", content, error) from error
 
     def retrieve_global_candidates(
         self,
@@ -529,10 +569,15 @@ class DeepSeekCandidateRetriever:
         )
         content = self.request(system_prompt, question_text, max_tokens=4096)
         if not content.strip():
-            raise ValueError("全局预召回返回空内容")
-        return normalize_pre_candidate_result(
-            parse_json_object(content), self.global_key_to_label
-        )
+            raise StageResponseError(
+                "全局预召回", content, ValueError("返回空内容")
+            )
+        try:
+            return normalize_pre_candidate_result(
+                parse_json_object(content), self.global_key_to_label
+            )
+        except Exception as error:
+            raise StageResponseError("全局预召回", content, error) from error
 
     def select_final_candidates(
         self,
@@ -541,8 +586,7 @@ class DeepSeekCandidateRetriever:
         tagging_evidence: list[dict[str, str]],
     ) -> tuple[list[str], list[dict[str, Any]], list[str]]:
         key_to_label = {
-            f"C{index:03d}": label
-            for index, label in enumerate(pre_candidates, start=1)
+            self.label_to_key[label]: label for label in pre_candidates
         }
         candidate_catalog = "\n".join(
             f"{key}｜{self.catalog_lines[label]}"
@@ -558,12 +602,17 @@ class DeepSeekCandidateRetriever:
         )
         content = self.request(system_prompt, question_text, max_tokens=4096)
         if not content.strip():
-            raise ValueError("统一候选判断返回空内容")
-        return normalize_match_result(
-            parse_json_object(content),
-            key_to_label,
-            {item["evidence_id"] for item in tagging_evidence},
-        )
+            raise StageResponseError(
+                "最终筛选", content, ValueError("返回空内容")
+            )
+        try:
+            return normalize_match_result(
+                parse_json_object(content),
+                key_to_label,
+                {item["evidence_id"] for item in tagging_evidence},
+            )
+        except Exception as error:
+            raise StageResponseError("最终筛选", content, error) from error
 
     def retrieve(self, unit: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
         question_text = build_question_text(unit)
@@ -643,6 +692,7 @@ def run_retrieval(
     timeout: float,
     limit: int | None,
     trace_output: Path | None = None,
+    failure_trace_output: Path | None = None,
     base_urls: list[str] | None = None,
     concurrency_per_endpoint: int | None = None,
 ) -> dict[str, int]:
@@ -673,6 +723,8 @@ def run_retrieval(
                 "已有候选结果缺少诊断记录，请为本次测试使用新的输出文件："
                 f"{sorted(missing_trace)[:3]}"
             )
+    if failure_trace_output is not None:
+        failure_trace_output.parent.mkdir(parents=True, exist_ok=True)
     pending = [
         unit
         for unit in selected_units
@@ -694,11 +746,14 @@ def run_retrieval(
                 )
             )
 
-    def process(unit: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    def process(
+        unit: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
         unit_key = make_unit_key(unit)
         retriever = retriever_pool.get()
         try:
             last_error: Exception | None = None
+            failed_attempts: list[dict[str, Any]] = []
             for attempt in range(1, retries + 1):
                 try:
                     candidate_labels, trace = retriever.retrieve(unit)
@@ -722,9 +777,26 @@ def run_retrieval(
                         "unit_key": unit_key,
                         "pipeline_version": PIPELINE_VERSION,
                         **trace,
-                    }
+                    }, failed_attempts
                 except Exception as error:
                     last_error = error
+                    failed_attempts.append(
+                        {
+                            "attempt": attempt,
+                            "stage": (
+                                error.stage
+                                if isinstance(error, StageResponseError)
+                                else "unknown"
+                            ),
+                            "error_type": type(error).__name__,
+                            "error": str(error),
+                            "raw_response": (
+                                error.raw_response
+                                if isinstance(error, StageResponseError)
+                                else None
+                            ),
+                        }
+                    )
                     logging.warning(
                         "题目 %s 在 %s 第 %s 次调用失败：%s",
                         unit_key,
@@ -732,7 +804,9 @@ def run_retrieval(
                         attempt,
                         error,
                     )
-            raise RuntimeError(f"题目{unit_key}调用失败") from last_error
+            raise UnitRetrievalError(
+                unit_key, retriever.base_url, failed_attempts
+            ) from last_error
         finally:
             retriever_pool.put(retriever)
 
@@ -740,19 +814,53 @@ def run_retrieval(
     with (
         output_path.open("a", encoding="utf-8") as output_stream,
         (trace_output.open("a", encoding="utf-8") if trace_output else open(os.devnull, "w")) as trace_stream,
+        (failure_trace_output.open("a", encoding="utf-8") if failure_trace_output else open(os.devnull, "w")) as failure_trace_stream,
         ThreadPoolExecutor(max_workers=len(endpoints) * slots_per_endpoint) as executor,
         tqdm(total=len(pending), desc="Retrieving candidates") as progress,
     ):
         futures = {executor.submit(process, unit): unit for unit in pending}
         for future in as_completed(futures):
             try:
-                record, trace = future.result()
+                record, trace, failed_attempts = future.result()
+                if failed_attempts and failure_trace_output is not None:
+                    failure_trace_stream.write(
+                        json.dumps(
+                            {
+                                "unit_key": record["unit_key"],
+                                "pipeline_version": PIPELINE_VERSION,
+                                "endpoint": record["endpoint"],
+                                "status": "recovered",
+                                "attempts": failed_attempts,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+                    failure_trace_stream.flush()
                 if trace_output is not None:
                     trace_stream.write(json.dumps(trace, ensure_ascii=False) + "\n")
                     trace_stream.flush()
                 completed[record["unit_key"]] = record
                 output_stream.write(json.dumps(record, ensure_ascii=False) + "\n")
                 output_stream.flush()
+            except UnitRetrievalError as error:
+                errors += 1
+                if failure_trace_output is not None:
+                    failure_trace_stream.write(
+                        json.dumps(
+                            {
+                                "unit_key": error.unit_key,
+                                "pipeline_version": PIPELINE_VERSION,
+                                "endpoint": error.endpoint,
+                                "status": "failed",
+                                "attempts": error.attempts,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+                    failure_trace_stream.flush()
+                logging.error("%s", error)
             except Exception as error:
                 errors += 1
                 logging.error("%s", error)
@@ -779,6 +887,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--catalog", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--trace-output", type=Path)
+    parser.add_argument("--failure-trace-output", type=Path)
     parser.add_argument("--log-file", type=Path, required=True)
     parser.add_argument("--model", default=os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL))
     endpoint_group = parser.add_mutually_exclusive_group()
@@ -818,6 +927,11 @@ def main() -> None:
     )
     catalog, allowed_paths = load_catalog(args.catalog)
     units, skipped_empty_stem = load_units(args.input)
+    failure_trace_output = args.failure_trace_output
+    if failure_trace_output is None and args.trace_output is not None:
+        failure_trace_output = args.trace_output.with_name(
+            f"{args.trace_output.stem}-failures.jsonl"
+        )
     summary = run_retrieval(
         units,
         catalog,
@@ -831,6 +945,7 @@ def main() -> None:
         args.timeout,
         args.limit,
         args.trace_output,
+        failure_trace_output,
         args.base_urls,
         args.concurrency_per_endpoint if args.base_urls else None,
     )
