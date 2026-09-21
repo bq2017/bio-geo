@@ -32,7 +32,8 @@ WORLD_REGION_BRANCHES = {
     "世界重要的国家",
     "世界地理微区域",
 }
-DEFAULT_REGION_RECALL_KS = (1, 3, 5, 10, 20)
+NONREGION_DIAGNOSTIC_LIMIT = 50
+REGION_DIAGNOSTIC_LIMIT = 20
 
 
 def read_jsonl(path: Path) -> Iterable[tuple[int, dict[str, Any]]]:
@@ -430,27 +431,22 @@ def run_retrieval(
     index_dir: Path,
     output_path: Path,
     summary_path: Path,
-    bm25_top_k: int,
-    bge_top_k: int,
+    nonregion_candidate_limit: int,
+    region_candidate_limit: int,
     batch_size: int,
     device: str | None,
     embedding_model: str | None,
     region_index_dir: Path | None = None,
-    region_top_k: int = 10,
-    max_candidates: int = 40,
     agreement_weight: float = 0.25,
     region_bm25_min_score: float = 0.0,
     region_bge_min_score: float = 0.4,
-    region_recall_ks: tuple[int, ...] = DEFAULT_REGION_RECALL_KS,
     query_encoder: Callable[[list[str], str, str, int, str | None], Any] = encode_queries,
 ) -> dict[str, Any]:
     if (
-        bm25_top_k <= 0
-        or bge_top_k <= 0
-        or region_top_k <= 0
-        or max_candidates <= 0
+        nonregion_candidate_limit <= 0
+        or region_candidate_limit <= 0
     ):
-        raise ValueError("各候选参数必须大于0")
+        raise ValueError("候选数量限制必须大于0")
     if not 0 <= agreement_weight < 1:
         raise ValueError("agreement_weight必须大于等于0且小于1")
     manifest, labels, bm25, label_embeddings = load_index(index_dir)
@@ -526,23 +522,10 @@ def run_retrieval(
             )
         if region_query_embeddings.shape[1] != region_embeddings.shape[1]:
             raise ValueError("区域题目向量与区域标签向量维度不一致")
-    effective_region_ks = tuple(
-        sorted({value for value in region_recall_ks if 0 < value <= region_top_k})
-    )
-    if region_top_k not in effective_region_ks:
-        effective_region_ks += (region_top_k,)
-        effective_region_ks = tuple(sorted(effective_region_ks))
-
     metrics = {
         name: metric_record()
-        for name in ("bm25", "bge", "fusion", "combined")
+        for name in ("nonregional_final", "regional_final", "combined")
     }
-    regional_metrics = {
-        route: {value: metric_record() for value in effective_region_ks}
-        for route in ("bm25", "bge", "fusion")
-    }
-    regional_exact_metrics = metric_record()
-    regional_final_metrics = metric_record()
     unknown_gold_labels: dict[str, int] = {}
     fused_counts: list[int] = []
     regional_counts: list[int] = []
@@ -556,7 +539,7 @@ def run_retrieval(
                 top_indices_from_pool(
                     sparse_scores,
                     nonregion_indices,
-                    min(bm25_top_k, len(nonregion_indices)),
+                    len(nonregion_indices),
                 ),
                 sparse_scores,
                 labels,
@@ -565,14 +548,16 @@ def run_retrieval(
                 top_indices_from_pool(
                     dense_scores,
                     nonregion_indices,
-                    min(bge_top_k, len(nonregion_indices)),
+                    len(nonregion_indices),
                 ),
                 dense_scores,
                 labels,
             )
-            fused = rank_fused_candidates(
-                {"bm25": sparse, "bge": dense},
+            sparse_admitted = [item for item in sparse if item["score"] > 0]
+            nonregional_final = rank_fused_candidates(
+                {"bm25": sparse_admitted, "bge": dense},
                 agreement_weight=agreement_weight,
+                limit=nonregion_candidate_limit,
             )
             regional_sparse_scores = (
                 sparse_scores
@@ -588,7 +573,7 @@ def run_retrieval(
                 top_indices_from_pool(
                     regional_sparse_scores,
                     region_indices,
-                    min(region_top_k, len(region_indices)),
+                    len(region_indices),
                 ),
                 regional_sparse_scores,
                 region_labels,
@@ -597,7 +582,7 @@ def run_retrieval(
                 top_indices_from_pool(
                     regional_dense_scores,
                     region_indices,
-                    min(region_top_k, len(region_indices)),
+                    len(region_indices),
                 ),
                 regional_dense_scores,
                 region_labels,
@@ -624,20 +609,9 @@ def run_retrieval(
                 },
                 exact_matches=regional_exact,
                 agreement_weight=agreement_weight,
+                limit=region_candidate_limit,
             )
-            combined = rank_fused_candidates(
-                {
-                    "bm25": sparse,
-                    "bge": dense,
-                    "region_bm25": regional_sparse,
-                    "region_bge": regional_dense,
-                },
-                exact_matches=regional_exact,
-                agreement_weight=agreement_weight,
-                limit=max_candidates,
-            )
-            for global_rank, candidate in enumerate(combined, start=1):
-                candidate["global_rank"] = global_rank
+            combined = merge_candidate_lists(nonregional_final, regional_fused)
             gold = question_gold_labels(question)
             for label in gold:
                 if label not in allowed_labels:
@@ -646,60 +620,30 @@ def run_retrieval(
             nonregional_gold = [
                 label for label in known_gold if not is_region_label_path(label)
             ]
-            sparse_labels = {item["label_path"] for item in sparse}
-            dense_labels = {item["label_path"] for item in dense}
-            fused_labels = {item["label_path"] for item in fused}
+            nonregional_final_labels = {
+                item["label_path"] for item in nonregional_final
+            }
             combined_labels = {item["label_path"] for item in combined}
-            update_metrics(metrics["bm25"], nonregional_gold, sparse_labels)
-            update_metrics(metrics["bge"], nonregional_gold, dense_labels)
-            update_metrics(metrics["fusion"], nonregional_gold, fused_labels)
+            update_metrics(
+                metrics["nonregional_final"],
+                nonregional_gold,
+                nonregional_final_labels,
+            )
             update_metrics(metrics["combined"], known_gold, combined_labels)
 
             regional_gold = [
                 label for label in known_gold if is_region_label_path(label)
             ]
-            exact_labels = {item["label_path"] for item in regional_exact}
             regional_fused_labels = {
                 item["label_path"] for item in regional_fused
             }
-            regional_final = [
-                item
-                for item in combined
-                if is_region_label_path(item["label_path"])
-            ]
-            regional_final_labels = {
-                item["label_path"] for item in regional_final
-            }
             update_metrics(
-                regional_exact_metrics, regional_gold, exact_labels
+                metrics["regional_final"],
+                regional_gold,
+                regional_fused_labels,
             )
-            update_metrics(
-                regional_final_metrics, regional_gold, regional_final_labels
-            )
-            for value in effective_region_ks:
-                regional_sparse_labels = {
-                    item["label_path"] for item in regional_sparse_full[:value]
-                }
-                regional_dense_labels = {
-                    item["label_path"] for item in regional_dense_full[:value]
-                }
-                update_metrics(
-                    regional_metrics["bm25"][value],
-                    regional_gold,
-                    regional_sparse_labels,
-                )
-                update_metrics(
-                    regional_metrics["bge"][value],
-                    regional_gold,
-                    regional_dense_labels,
-                )
-                update_metrics(
-                    regional_metrics["fusion"][value],
-                    regional_gold,
-                    regional_sparse_labels | regional_dense_labels | exact_labels,
-                )
-            fused_counts.append(len(fused))
-            regional_counts.append(len(regional_final))
+            fused_counts.append(len(nonregional_final))
+            regional_counts.append(len(regional_fused))
             combined_counts.append(len(combined))
             result = {
                 "question_id": as_text(question.get("question_id")),
@@ -708,32 +652,38 @@ def run_retrieval(
                 "unmapped_gold_labels": [
                     label for label in gold if label not in allowed_labels
                 ],
-                "bm25_candidates": sparse,
-                "bm25_missing_labels": [
-                    label for label in nonregional_gold if label not in sparse_labels
+                "bm25_candidates": sparse[:NONREGION_DIAGNOSTIC_LIMIT],
+                "bge_candidates": dense[:NONREGION_DIAGNOSTIC_LIMIT],
+                "nonregional_final_candidates": nonregional_final,
+                "nonregional_final_missing_labels": [
+                    label
+                    for label in nonregional_gold
+                    if label not in nonregional_final_labels
                 ],
-                "bge_candidates": dense,
-                "bge_missing_labels": [
-                    label for label in nonregional_gold if label not in dense_labels
-                ],
-                "fused_candidates": fused,
+                "fused_candidates": nonregional_final,
                 "fusion_missing_labels": [
-                    label for label in nonregional_gold if label not in fused_labels
+                    label
+                    for label in nonregional_gold
+                    if label not in nonregional_final_labels
                 ],
                 "regional_exact_matches": regional_exact,
-                "regional_bm25_candidates": regional_sparse_full,
-                "regional_bge_candidates": regional_dense_full,
+                "regional_bm25_candidates": regional_sparse_full[
+                    :REGION_DIAGNOSTIC_LIMIT
+                ],
+                "regional_bge_candidates": regional_dense_full[
+                    :REGION_DIAGNOSTIC_LIMIT
+                ],
                 "regional_fused_candidates": regional_fused,
                 "regional_fused_missing_labels": [
                     label
                     for label in regional_gold
                     if label not in regional_fused_labels
                 ],
-                "regional_final_candidates": regional_final,
+                "regional_final_candidates": regional_fused,
                 "regional_final_missing_labels": [
                     label
                     for label in regional_gold
-                    if label not in regional_final_labels
+                    if label not in regional_fused_labels
                 ],
                 "combined_candidates": combined,
                 "combined_missing_labels": [
@@ -747,29 +697,19 @@ def run_retrieval(
         "input_questions": len(questions),
         "label_count": len(labels),
         "nonregional_label_count": len(nonregion_indices),
-        "bm25_top_k": bm25_top_k,
-        "bge_top_k": bge_top_k,
+        "nonregion_candidate_limit": nonregion_candidate_limit,
         "regional_label_count": len(region_indices),
         "regional_index": str(region_index_dir) if region_index_dir else None,
-        "region_top_k": region_top_k,
-        "max_candidates": max_candidates,
+        "region_candidate_limit": region_candidate_limit,
+        "maximum_combined_candidates": (
+            nonregion_candidate_limit + region_candidate_limit
+        ),
         "agreement_weight": agreement_weight,
         "region_bm25_min_score": region_bm25_min_score,
         "region_bge_min_score": region_bge_min_score,
         "embedding_model": model_name,
         "metrics": {name: finalize_metrics(value) for name, value in metrics.items()},
-        "regional_metrics": {
-            "exact_name_match": finalize_metrics(regional_exact_metrics),
-            "final_candidates": finalize_metrics(regional_final_metrics),
-            **{
-                route: {
-                    str(value): finalize_metrics(route_metrics[value])
-                    for value in effective_region_ks
-                }
-                for route, route_metrics in regional_metrics.items()
-            },
-        },
-        "fused_candidate_count": {
+        "nonregional_candidate_count": {
             "average": round(sum(fused_counts) / len(fused_counts), 6)
             if fused_counts
             else None,
@@ -808,10 +748,8 @@ def main() -> None:
     parser.add_argument("--region-index-dir", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--summary-output", type=Path, required=True)
-    parser.add_argument("--bm25-top-k", type=int, default=12)
-    parser.add_argument("--bge-top-k", type=int, default=23)
-    parser.add_argument("--region-top-k", type=int, default=10)
-    parser.add_argument("--max-candidates", type=int, default=40)
+    parser.add_argument("--nonregion-candidate-limit", type=int, default=25)
+    parser.add_argument("--region-candidate-limit", type=int, default=5)
     parser.add_argument("--agreement-weight", type=float, default=0.25)
     parser.add_argument("--region-bm25-min-score", type=float, default=0.0)
     parser.add_argument("--region-bge-min-score", type=float, default=0.4)
@@ -828,13 +766,11 @@ def main() -> None:
         region_index_dir=args.region_index_dir,
         output_path=args.output,
         summary_path=args.summary_output,
-        bm25_top_k=args.bm25_top_k,
-        bge_top_k=args.bge_top_k,
+        nonregion_candidate_limit=args.nonregion_candidate_limit,
+        region_candidate_limit=args.region_candidate_limit,
         batch_size=args.batch_size,
         device=args.device,
         embedding_model=args.embedding_model,
-        region_top_k=args.region_top_k,
-        max_candidates=args.max_candidates,
         agreement_weight=args.agreement_weight,
         region_bm25_min_score=args.region_bm25_min_score,
         region_bge_min_score=args.region_bge_min_score,

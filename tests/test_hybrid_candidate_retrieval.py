@@ -265,28 +265,22 @@ def test_run_retrieval_writes_results_and_route_metrics(tmp_path):
         index_dir,
         output_path,
         summary_path,
-        bm25_top_k=1,
-        bge_top_k=1,
+        nonregion_candidate_limit=1,
+        region_candidate_limit=1,
         batch_size=8,
         device="cpu",
         embedding_model=None,
-        region_top_k=1,
         query_encoder=fake_encoder,
     )
     result = json.loads(output_path.read_text(encoding="utf-8"))
     assert result["bm25_candidates"][0]["label_path"] == "知识点@乙"
     assert result["bge_candidates"][0]["label_path"] == "知识点@乙"
-    assert result["bm25_missing_labels"] == []
-    assert result["bge_missing_labels"] == []
     assert result["fusion_missing_labels"] == []
-    assert summary["metrics"]["fusion"]["label_recall"] is None
+    assert summary["metrics"]["nonregional_final"]["label_recall"] is None
     assert summary["regional_label_count"] == 2
     assert summary["metrics"]["combined"]["label_recall"] == 1.0
-    assert summary["regional_metrics"]["final_candidates"]["label_recall"] == 1.0
-    assert result["candidate_count"] <= summary["max_candidates"]
-    assert [item["global_rank"] for item in result["combined_candidates"]] == list(
-        range(1, result["candidate_count"] + 1)
-    )
+    assert summary["metrics"]["regional_final"]["label_recall"] == 1.0
+    assert result["candidate_count"] <= summary["maximum_combined_candidates"]
 
 
 def test_run_retrieval_uses_separate_region_index(tmp_path):
@@ -323,9 +317,8 @@ def test_run_retrieval_uses_separate_region_index(tmp_path):
         region_index_dir=region_index_dir,
         output_path=output_path,
         summary_path=tmp_path / "summary.json",
-        bm25_top_k=1,
-        bge_top_k=1,
-        region_top_k=1,
+        nonregion_candidate_limit=1,
+        region_candidate_limit=1,
         batch_size=8,
         device="cpu",
         embedding_model=None,
@@ -337,7 +330,7 @@ def test_run_retrieval_uses_separate_region_index(tmp_path):
     assert result["regional_exact_matches"] == [
         {"label_path": expected, "matched_name": "丙岛"}
     ]
-    assert result["combined_candidates"][0]["label_path"] == expected
+    assert result["regional_final_candidates"][0]["label_path"] == expected
     assert summary["regional_index"] == str(region_index_dir)
 
 
@@ -375,9 +368,8 @@ def test_irrelevant_region_candidates_are_not_forced_into_final_results(tmp_path
         region_index_dir=region_index_dir,
         output_path=output_path,
         summary_path=tmp_path / "summary.json",
-        bm25_top_k=1,
-        bge_top_k=1,
-        region_top_k=1,
+        nonregion_candidate_limit=1,
+        region_candidate_limit=1,
         batch_size=8,
         device="cpu",
         embedding_model=None,
@@ -394,9 +386,8 @@ def test_retrieval_rejects_invalid_agreement_weight(tmp_path):
             index_dir=tmp_path / "unused-index",
             output_path=tmp_path / "unused-output.jsonl",
             summary_path=tmp_path / "unused-summary.json",
-            bm25_top_k=20,
-            bge_top_k=20,
-            max_candidates=40,
+            nonregion_candidate_limit=25,
+            region_candidate_limit=5,
             agreement_weight=1.0,
             batch_size=8,
             device="cpu",
