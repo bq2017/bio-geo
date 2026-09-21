@@ -10,6 +10,7 @@ from bio_geo_tagging.hybrid_candidate_retrieval import (
     is_region_label_path,
     question_gold_labels,
     question_query_text,
+    rank_region_candidates,
     run_retrieval,
 )
 
@@ -91,6 +92,26 @@ def test_fusion_keeps_both_routes_and_deduplicates():
         {"label_path": "乙", "bm25_rank": 2, "bge_rank": 1},
         {"label_path": "丙", "bm25_rank": None, "bge_rank": 2},
     ]
+
+
+def test_region_fusion_applies_strict_limit_and_exact_name_bonus():
+    bm25 = [
+        {"rank": 1, "label_path": "甲", "score": 2.0},
+        {"rank": 2, "label_path": "乙", "score": 1.0},
+    ]
+    bge = [
+        {"rank": 1, "label_path": "乙", "score": 0.9},
+        {"rank": 2, "label_path": "丙", "score": 0.8},
+    ]
+    result = rank_region_candidates(
+        bm25,
+        bge,
+        [{"label_path": "丙", "matched_name": "丙地"}],
+        limit=2,
+    )
+    assert [item["label_path"] for item in result] == ["丙", "乙"]
+    assert result[0]["matched_name"] == "丙地"
+    assert len(result) == 2
 
 
 def make_index(index_dir: Path) -> None:
@@ -218,16 +239,16 @@ def test_run_retrieval_writes_results_and_route_metrics(tmp_path):
         query_encoder=fake_encoder,
     )
     result = json.loads(output_path.read_text(encoding="utf-8"))
-    expected = "知识点@中国地理@中国地理微区域@甲地"
-    assert result["bm25_candidates"][0]["label_path"] == expected
-    assert result["bge_candidates"][0]["label_path"] == expected
+    assert result["bm25_candidates"][0]["label_path"] == "知识点@乙"
+    assert result["bge_candidates"][0]["label_path"] == "知识点@乙"
     assert result["bm25_missing_labels"] == []
     assert result["bge_missing_labels"] == []
     assert result["fusion_missing_labels"] == []
-    assert summary["metrics"]["fusion"]["label_recall"] == 1.0
-    assert summary["metrics"]["fusion"]["full_coverage_rate"] == 1.0
+    assert summary["metrics"]["fusion"]["label_recall"] is None
     assert summary["regional_label_count"] == 2
     assert summary["metrics"]["combined"]["label_recall"] == 1.0
+    assert summary["regional_metrics"]["final_candidates"]["label_recall"] == 1.0
+    assert result["candidate_count"] <= summary["max_candidates"]
 
 
 def test_run_retrieval_uses_separate_region_index(tmp_path):
@@ -279,3 +300,20 @@ def test_run_retrieval_uses_separate_region_index(tmp_path):
         {"label_path": expected, "matched_name": "丙岛"}
     ]
     assert summary["regional_index"] == str(region_index_dir)
+
+
+def test_retrieval_rejects_candidate_quotas_above_total_limit(tmp_path):
+    with pytest.raises(ValueError, match="候选配额超过总上限"):
+        run_retrieval(
+            input_path=tmp_path / "unused.jsonl",
+            index_dir=tmp_path / "unused-index",
+            output_path=tmp_path / "unused-output.jsonl",
+            summary_path=tmp_path / "unused-summary.json",
+            bm25_top_k=20,
+            bge_top_k=20,
+            region_candidate_limit=5,
+            max_candidates=40,
+            batch_size=8,
+            device="cpu",
+            embedding_model=None,
+        )
