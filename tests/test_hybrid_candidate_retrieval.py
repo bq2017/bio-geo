@@ -10,6 +10,8 @@ from bio_geo_tagging.hybrid_candidate_retrieval import (
     is_region_label_path,
     question_gold_labels,
     question_query_text,
+    question_region_exact_text,
+    rank_fused_candidates,
     rank_region_candidates,
     run_retrieval,
 )
@@ -78,6 +80,19 @@ def test_question_text_and_gold_cover_root_and_subquestions():
     assert question_gold_labels(question) == ["标签甲", "标签乙"]
 
 
+def test_region_exact_text_excludes_options_and_analysis():
+    question = {
+        "stem": "读北欧区域图",
+        "options": "A.非洲 B.北美洲",
+        "analysis": "非洲和北美洲均不符合题意",
+        "sub_questions": [],
+    }
+    text = question_region_exact_text(question)
+    assert "北欧" in text
+    assert "非洲" not in text
+    assert "北美洲" not in text
+
+
 def test_fusion_keeps_both_routes_and_deduplicates():
     bm25 = [
         {"rank": 1, "label_path": "甲", "score": 2.0},
@@ -94,7 +109,7 @@ def test_fusion_keeps_both_routes_and_deduplicates():
     ]
 
 
-def test_region_fusion_applies_strict_limit_and_exact_name_bonus():
+def test_region_fusion_applies_strict_limit():
     bm25 = [
         {"rank": 1, "label_path": "甲", "score": 2.0},
         {"rank": 2, "label_path": "乙", "score": 1.0},
@@ -109,9 +124,29 @@ def test_region_fusion_applies_strict_limit_and_exact_name_bonus():
         [{"label_path": "丙", "matched_name": "丙地"}],
         limit=2,
     )
-    assert [item["label_path"] for item in result] == ["丙", "乙"]
-    assert result[0]["matched_name"] == "丙地"
+    assert {item["label_path"] for item in result} == {"乙", "丙"}
+    assert next(item for item in result if item["label_path"] == "丙")[
+        "matched_name"
+    ] == "丙地"
     assert len(result) == 2
+
+
+def test_fusion_keeps_strong_single_route_above_two_weak_routes():
+    result = rank_fused_candidates(
+        {
+            "bm25": [
+                {"rank": 1, "label_path": "单路强", "score": 10.0},
+                {"rank": 10, "label_path": "双路弱", "score": 1.0},
+            ],
+            "bge": [
+                {"rank": 10, "label_path": "双路弱", "score": 0.4},
+            ],
+        },
+        agreement_weight=0.25,
+    )
+    assert [item["label_path"] for item in result] == ["单路强", "双路弱"]
+    assert result[0]["best_route_score"] == 1.0
+    assert result[1]["support_count"] == 2
 
 
 def make_index(index_dir: Path) -> None:
@@ -249,6 +284,9 @@ def test_run_retrieval_writes_results_and_route_metrics(tmp_path):
     assert summary["metrics"]["combined"]["label_recall"] == 1.0
     assert summary["regional_metrics"]["final_candidates"]["label_recall"] == 1.0
     assert result["candidate_count"] <= summary["max_candidates"]
+    assert [item["global_rank"] for item in result["combined_candidates"]] == list(
+        range(1, result["candidate_count"] + 1)
+    )
 
 
 def test_run_retrieval_uses_separate_region_index(tmp_path):
@@ -299,11 +337,58 @@ def test_run_retrieval_uses_separate_region_index(tmp_path):
     assert result["regional_exact_matches"] == [
         {"label_path": expected, "matched_name": "丙岛"}
     ]
+    assert result["combined_candidates"][0]["label_path"] == expected
     assert summary["regional_index"] == str(region_index_dir)
 
 
-def test_retrieval_rejects_candidate_quotas_above_total_limit(tmp_path):
-    with pytest.raises(ValueError, match="候选配额超过总上限"):
+def test_irrelevant_region_candidates_are_not_forced_into_final_results(tmp_path):
+    np = pytest.importorskip("numpy")
+    index_dir = tmp_path / "index"
+    region_index_dir = tmp_path / "region-index"
+    make_index(index_dir)
+    make_region_index(region_index_dir)
+    input_path = tmp_path / "questions.jsonl"
+    input_path.write_text(
+        json.dumps(
+            {
+                "parent_id": "1",
+                "question_id": "1",
+                "stem": "无关内容",
+                "options": "",
+                "analysis": "",
+                "knw_labels": ["知识点@乙"],
+                "sub_questions": [],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def fake_encoder(texts, model, instruction, batch_size, device):
+        return np.asarray([[0.0, 0.0]], dtype=np.float32)
+
+    output_path = tmp_path / "results.jsonl"
+    run_retrieval(
+        input_path=input_path,
+        index_dir=index_dir,
+        region_index_dir=region_index_dir,
+        output_path=output_path,
+        summary_path=tmp_path / "summary.json",
+        bm25_top_k=1,
+        bge_top_k=1,
+        region_top_k=1,
+        batch_size=8,
+        device="cpu",
+        embedding_model=None,
+        query_encoder=fake_encoder,
+    )
+    result = json.loads(output_path.read_text(encoding="utf-8"))
+    assert result["regional_final_candidates"] == []
+
+
+def test_retrieval_rejects_invalid_agreement_weight(tmp_path):
+    with pytest.raises(ValueError, match="agreement_weight"):
         run_retrieval(
             input_path=tmp_path / "unused.jsonl",
             index_dir=tmp_path / "unused-index",
@@ -311,8 +396,8 @@ def test_retrieval_rejects_candidate_quotas_above_total_limit(tmp_path):
             summary_path=tmp_path / "unused-summary.json",
             bm25_top_k=20,
             bge_top_k=20,
-            region_candidate_limit=5,
             max_candidates=40,
+            agreement_weight=1.0,
             batch_size=8,
             device="cpu",
             embedding_model=None,

@@ -19,6 +19,12 @@ QUESTION_TEXT_FIELDS = (
     "image_description",
 )
 
+REGION_EXACT_TEXT_FIELDS = (
+    "stem",
+    "answer",
+    "image_description",
+)
+
 CHINA_REGION_BRANCHES = {"中国地理分区", "中国地理微区域"}
 WORLD_REGION_BRANCHES = {
     "世界主要的大洲",
@@ -27,7 +33,6 @@ WORLD_REGION_BRANCHES = {
     "世界地理微区域",
 }
 DEFAULT_REGION_RECALL_KS = (1, 3, 5, 10, 20)
-REGION_RRF_CONSTANT = 60
 
 
 def read_jsonl(path: Path) -> Iterable[tuple[int, dict[str, Any]]]:
@@ -73,6 +78,22 @@ def question_query_text(question: dict[str, Any]) -> str:
     ):
         raise ValueError("sub_questions必须是对象数组")
     for sub_question in sub_questions:
+        append_fields(sub_question)
+    return "\n".join(parts)
+
+
+def question_region_exact_text(question: dict[str, Any]) -> str:
+    """Return fields where a place-name occurrence is direct question evidence."""
+    parts: list[str] = []
+
+    def append_fields(record: dict[str, Any]) -> None:
+        for field in REGION_EXACT_TEXT_FIELDS:
+            text = as_text(record.get(field))
+            if text:
+                parts.append(text)
+
+    append_fields(question)
+    for sub_question in question.get("sub_questions") or []:
         append_fields(sub_question)
     return "\n".join(parts)
 
@@ -285,37 +306,74 @@ def add_exact_region_matches(
     return result
 
 
+def rank_fused_candidates(
+    route_candidates: dict[str, list[dict[str, Any]]],
+    exact_matches: list[dict[str, str]] | None = None,
+    agreement_weight: float = 0.25,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Rank labels by their strongest route; other routes give bounded support."""
+    if not 0 <= agreement_weight < 1:
+        raise ValueError("agreement_weight必须大于等于0且小于1")
+    by_label: dict[str, dict[str, Any]] = {}
+    evidence_scores: dict[str, list[float]] = {}
+    for route, candidates in route_candidates.items():
+        for candidate in candidates:
+            label = candidate["label_path"]
+            item = by_label.setdefault(label, {"label_path": label})
+            item[f"{route}_rank"] = candidate["rank"]
+            item[f"{route}_raw_score"] = candidate["score"]
+            evidence_scores.setdefault(label, []).append(1.0 / candidate["rank"])
+
+    for match in exact_matches or []:
+        label = match["label_path"]
+        item = by_label.setdefault(label, {"label_path": label})
+        item["exact_name_match"] = True
+        item["matched_name"] = match["matched_name"]
+        evidence_scores.setdefault(label, []).append(1.0)
+
+    candidates = list(by_label.values())
+    for candidate in candidates:
+        scores = sorted(evidence_scores[candidate["label_path"]], reverse=True)
+        best_score = scores[0]
+        second_score = scores[1] if len(scores) > 1 else 0.0
+        candidate["best_route_score"] = round(best_score, 8)
+        candidate["second_route_score"] = round(second_score, 8)
+        candidate["support_count"] = len(scores)
+        candidate["fusion_score"] = round(
+            best_score + agreement_weight * second_score,
+            8,
+        )
+    candidates.sort(
+        key=lambda item: (
+            -item["fusion_score"],
+            -item["best_route_score"],
+            -item["second_route_score"],
+            -item["support_count"],
+            item["label_path"],
+        )
+    )
+    if limit is not None:
+        return candidates[:limit]
+    return candidates
+
+
 def rank_region_candidates(
     bm25_candidates: list[dict[str, Any]],
     bge_candidates: list[dict[str, Any]],
     exact_matches: list[dict[str, str]],
     limit: int,
+    agreement_weight: float = 0.25,
 ) -> list[dict[str, Any]]:
-    """Fuse regional routes and return a strict, deterministic candidate quota."""
-    exact_by_label = {
-        item["label_path"]: item["matched_name"] for item in exact_matches
-    }
-    candidates = add_exact_region_matches(
-        fuse_candidates(bm25_candidates, bge_candidates), exact_matches
+    return rank_fused_candidates(
+        {
+            "region_bm25": bm25_candidates,
+            "region_bge": bge_candidates,
+        },
+        exact_matches=exact_matches,
+        agreement_weight=agreement_weight,
+        limit=limit,
     )
-    for candidate in candidates:
-        score = 0.0
-        for field in ("bm25_rank", "bge_rank"):
-            rank = candidate[field]
-            if rank is not None:
-                score += 1.0 / (REGION_RRF_CONSTANT + rank)
-        matched_name = exact_by_label.get(candidate["label_path"])
-        if matched_name is not None:
-            score += 1.0 / (REGION_RRF_CONSTANT + 1)
-            candidate["matched_name"] = matched_name
-        candidate["fusion_score"] = round(score, 8)
-    candidates.sort(
-        key=lambda item: (
-            -item["fusion_score"],
-            item["label_path"],
-        )
-    )
-    return candidates[:limit]
 
 
 def merge_candidate_lists(
@@ -379,8 +437,10 @@ def run_retrieval(
     embedding_model: str | None,
     region_index_dir: Path | None = None,
     region_top_k: int = 10,
-    region_candidate_limit: int = 5,
     max_candidates: int = 40,
+    agreement_weight: float = 0.25,
+    region_bm25_min_score: float = 0.0,
+    region_bge_min_score: float = 0.4,
     region_recall_ks: tuple[int, ...] = DEFAULT_REGION_RECALL_KS,
     query_encoder: Callable[[list[str], str, str, int, str | None], Any] = encode_queries,
 ) -> dict[str, Any]:
@@ -388,16 +448,11 @@ def run_retrieval(
         bm25_top_k <= 0
         or bge_top_k <= 0
         or region_top_k <= 0
-        or region_candidate_limit <= 0
         or max_candidates <= 0
     ):
         raise ValueError("各候选参数必须大于0")
-    if bm25_top_k + bge_top_k + region_candidate_limit > max_candidates:
-        raise ValueError(
-            "候选配额超过总上限："
-            f"{bm25_top_k}+{bge_top_k}+{region_candidate_limit}>"
-            f"{max_candidates}"
-        )
+    if not 0 <= agreement_weight < 1:
+        raise ValueError("agreement_weight必须大于等于0且小于1")
     manifest, labels, bm25, label_embeddings = load_index(index_dir)
     region_manifest: dict[str, Any] | None = None
     region_labels: list[dict[str, Any]]
@@ -515,7 +570,10 @@ def run_retrieval(
                 dense_scores,
                 labels,
             )
-            fused = fuse_candidates(sparse, dense)
+            fused = rank_fused_candidates(
+                {"bm25": sparse, "bge": dense},
+                agreement_weight=agreement_weight,
+            )
             regional_sparse_scores = (
                 sparse_scores
                 if region_index_dir is None
@@ -544,20 +602,42 @@ def run_retrieval(
                 regional_dense_scores,
                 region_labels,
             )
+            regional_sparse = [
+                item
+                for item in regional_sparse_full
+                if item["score"] > region_bm25_min_score
+            ]
+            regional_dense = [
+                item
+                for item in regional_dense_full
+                if item["score"] >= region_bge_min_score
+            ]
             regional_exact = exact_region_candidates(
-                query, region_labels, region_indices
+                question_region_exact_text(question),
+                region_labels,
+                region_indices,
             )
-            regional_fused = rank_region_candidates(
-                regional_sparse_full,
-                regional_dense_full,
-                regional_exact,
-                region_candidate_limit,
+            regional_fused = rank_fused_candidates(
+                {
+                    "region_bm25": regional_sparse,
+                    "region_bge": regional_dense,
+                },
+                exact_matches=regional_exact,
+                agreement_weight=agreement_weight,
             )
-            combined = merge_candidate_lists(fused, regional_fused)
-            if len(combined) > max_candidates:
-                raise AssertionError(
-                    f"题目候选数超过上限：{len(combined)}>{max_candidates}"
-                )
+            combined = rank_fused_candidates(
+                {
+                    "bm25": sparse,
+                    "bge": dense,
+                    "region_bm25": regional_sparse,
+                    "region_bge": regional_dense,
+                },
+                exact_matches=regional_exact,
+                agreement_weight=agreement_weight,
+                limit=max_candidates,
+            )
+            for global_rank, candidate in enumerate(combined, start=1):
+                candidate["global_rank"] = global_rank
             gold = question_gold_labels(question)
             for label in gold:
                 if label not in allowed_labels:
@@ -582,11 +662,19 @@ def run_retrieval(
             regional_fused_labels = {
                 item["label_path"] for item in regional_fused
             }
+            regional_final = [
+                item
+                for item in combined
+                if is_region_label_path(item["label_path"])
+            ]
+            regional_final_labels = {
+                item["label_path"] for item in regional_final
+            }
             update_metrics(
                 regional_exact_metrics, regional_gold, exact_labels
             )
             update_metrics(
-                regional_final_metrics, regional_gold, regional_fused_labels
+                regional_final_metrics, regional_gold, regional_final_labels
             )
             for value in effective_region_ks:
                 regional_sparse_labels = {
@@ -611,7 +699,7 @@ def run_retrieval(
                     regional_sparse_labels | regional_dense_labels | exact_labels,
                 )
             fused_counts.append(len(fused))
-            regional_counts.append(len(regional_fused))
+            regional_counts.append(len(regional_final))
             combined_counts.append(len(combined))
             result = {
                 "question_id": as_text(question.get("question_id")),
@@ -641,6 +729,12 @@ def run_retrieval(
                     for label in regional_gold
                     if label not in regional_fused_labels
                 ],
+                "regional_final_candidates": regional_final,
+                "regional_final_missing_labels": [
+                    label
+                    for label in regional_gold
+                    if label not in regional_final_labels
+                ],
                 "combined_candidates": combined,
                 "combined_missing_labels": [
                     label for label in known_gold if label not in combined_labels
@@ -658,8 +752,10 @@ def run_retrieval(
         "regional_label_count": len(region_indices),
         "regional_index": str(region_index_dir) if region_index_dir else None,
         "region_top_k": region_top_k,
-        "region_candidate_limit": region_candidate_limit,
         "max_candidates": max_candidates,
+        "agreement_weight": agreement_weight,
+        "region_bm25_min_score": region_bm25_min_score,
+        "region_bge_min_score": region_bge_min_score,
         "embedding_model": model_name,
         "metrics": {name: finalize_metrics(value) for name, value in metrics.items()},
         "regional_metrics": {
@@ -715,8 +811,10 @@ def main() -> None:
     parser.add_argument("--bm25-top-k", type=int, default=12)
     parser.add_argument("--bge-top-k", type=int, default=23)
     parser.add_argument("--region-top-k", type=int, default=10)
-    parser.add_argument("--region-candidate-limit", type=int, default=5)
     parser.add_argument("--max-candidates", type=int, default=40)
+    parser.add_argument("--agreement-weight", type=float, default=0.25)
+    parser.add_argument("--region-bm25-min-score", type=float, default=0.0)
+    parser.add_argument("--region-bge-min-score", type=float, default=0.4)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--device")
     parser.add_argument("--embedding-model")
@@ -736,8 +834,10 @@ def main() -> None:
         device=args.device,
         embedding_model=args.embedding_model,
         region_top_k=args.region_top_k,
-        region_candidate_limit=args.region_candidate_limit,
         max_candidates=args.max_candidates,
+        agreement_weight=args.agreement_weight,
+        region_bm25_min_score=args.region_bm25_min_score,
+        region_bge_min_score=args.region_bge_min_score,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
