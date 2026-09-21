@@ -11,6 +11,7 @@ from bio_geo_tagging.build_retrieval_index import (
 from bio_geo_tagging.hybrid_candidate_retrieval import (
     admitted_region_label_paths,
     bm25_scores,
+    combine_nonregion_candidates,
     exact_region_candidates,
     fuse_candidates,
     is_region_label_path,
@@ -250,6 +251,30 @@ def test_fusion_keeps_strong_single_route_above_two_weak_routes():
     assert [item["label_path"] for item in result] == ["单路强", "双路弱"]
     assert result[0]["best_route_score"] == 1.0
     assert result[1]["support_count"] == 2
+
+
+def test_nonregion_combination_keeps_quota_and_fused_candidates():
+    bm25 = [
+        {"rank": rank, "label_path": f"label-{rank}", "score": 1.0 / rank}
+        for rank in range(1, 21)
+    ]
+    bge = [
+        {"rank": rank, "label_path": f"label-{rank}", "score": 1.0 / rank}
+        for rank in range(1, 31)
+    ]
+    final, fused = combine_nonregion_candidates(
+        bm25,
+        bge,
+        agreement_weight=0.25,
+        limit=35,
+    )
+
+    labels = {item["label_path"] for item in final}
+    assert len(final) == 25
+    assert len(fused) == 25
+    assert "label-23" in labels
+    assert "label-25" in labels
+    assert "label-26" not in labels
 
 
 def make_index(index_dir: Path) -> None:
