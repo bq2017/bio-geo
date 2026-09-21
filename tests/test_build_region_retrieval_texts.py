@@ -44,6 +44,7 @@ def test_build_record_uses_place_names_only():
     assert record["exact_names"] == ["欧洲西部", "西欧"]
     assert "荷兰" in record["bm25_text"]
     assert "鲁尔区" in record["embedding_text"]
+    assert "鲁尔区" not in record["bm25_text"]
     assert "经济发达" not in record["bm25_text"]
     assert "温带海洋性气候" not in record["embedding_text"]
 

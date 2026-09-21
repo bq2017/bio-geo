@@ -73,16 +73,15 @@ def build_record(record: dict[str, Any], line_number: int) -> dict[str, Any]:
         for field in LIST_FIELDS
     }
     exact_names = list(dict.fromkeys([region_name, *values["aliases"]]))
-    retrieval_names = list(
+    bm25_names = list(
         dict.fromkeys(
             [
                 *exact_names,
                 *values["contained_places"],
-                *values["representative_places"],
             ]
         )
     )
-    if not retrieval_names:
+    if not bm25_names:
         raise ValueError(f"第{line_number}行没有可用的区域名称")
 
     embedding_parts = [f"区域名称：{region_name}"]
@@ -102,7 +101,7 @@ def build_record(record: dict[str, Any], line_number: int) -> dict[str, Any]:
         "region_type": region_type,
         **values,
         "exact_names": exact_names,
-        "bm25_text": " ".join(retrieval_names),
+        "bm25_text": " ".join(bm25_names),
         "embedding_text": "。".join(embedding_parts) + "。",
     }
 

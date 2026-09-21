@@ -5,12 +5,14 @@ import pytest
 
 from bio_geo_tagging.build_retrieval_index import build_bm25_index, write_json
 from bio_geo_tagging.hybrid_candidate_retrieval import (
+    admitted_region_label_paths,
     exact_region_candidates,
     fuse_candidates,
     is_region_label_path,
     question_gold_labels,
     question_query_text,
     question_region_exact_text,
+    region_phrase_evidence,
     rank_fused_candidates,
     rank_region_candidates,
     run_retrieval,
@@ -80,7 +82,7 @@ def test_question_text_and_gold_cover_root_and_subquestions():
     assert question_gold_labels(question) == ["标签甲", "标签乙"]
 
 
-def test_region_exact_text_excludes_options_and_analysis():
+def test_region_exact_text_includes_analysis_but_excludes_options():
     question = {
         "stem": "读北欧区域图",
         "options": "A.非洲 B.北美洲",
@@ -89,8 +91,43 @@ def test_region_exact_text_excludes_options_and_analysis():
     }
     text = question_region_exact_text(question)
     assert "北欧" in text
-    assert "非洲" not in text
-    assert "北美洲" not in text
+    assert "非洲和北美洲均不符合题意" in text
+    assert "A.非洲 B.北美洲" not in text
+
+
+def test_region_admission_requires_direct_or_multiple_weak_clues():
+    labels = [
+        {
+            "label_path": "知识点@中国地理@中国地理微区域@黄淮海平原",
+            "exact_names": ["黄淮海平原", "华北平原"],
+            "contained_places": ["河北平原"],
+            "representative_places": ["黄河", "渤海"],
+        },
+        {
+            "label_path": "知识点@中国地理@中国地理分区@北方地区@北京",
+            "exact_names": ["北京", "北京市"],
+            "contained_places": ["东城区"],
+            "representative_places": ["太行山", "永定河"],
+        },
+    ]
+    evidence = region_phrase_evidence(
+        "太行山是黄土高原和华北平原的分界线",
+        labels,
+        [0, 1],
+    )
+    admitted = admitted_region_label_paths(
+        [
+            {"rank": 6, "label_path": labels[0]["label_path"], "score": 1.0},
+            {"rank": 3, "label_path": labels[1]["label_path"], "score": 2.0},
+        ],
+        [
+            {"rank": 5, "label_path": labels[0]["label_path"], "score": 0.6},
+            {"rank": 12, "label_path": labels[1]["label_path"], "score": 0.5},
+        ],
+        evidence,
+    )
+    assert labels[0]["label_path"] in admitted
+    assert labels[1]["label_path"] not in admitted
 
 
 def test_fusion_keeps_both_routes_and_deduplicates():

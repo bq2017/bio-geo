@@ -22,6 +22,8 @@ QUESTION_TEXT_FIELDS = (
 REGION_EXACT_TEXT_FIELDS = (
     "stem",
     "answer",
+    "analysis",
+    "explanation",
     "image_description",
 )
 
@@ -34,6 +36,8 @@ WORLD_REGION_BRANCHES = {
 }
 NONREGION_DIAGNOSTIC_LIMIT = 50
 REGION_DIAGNOSTIC_LIMIT = 20
+REGION_DUAL_ROUTE_MAX_RANK = 10
+REGION_MIN_REPRESENTATIVE_MATCHES = 2
 
 
 def read_jsonl(path: Path) -> Iterable[tuple[int, dict[str, Any]]]:
@@ -84,7 +88,7 @@ def question_query_text(question: dict[str, Any]) -> str:
 
 
 def question_region_exact_text(question: dict[str, Any]) -> str:
-    """Return fields where a place-name occurrence is direct question evidence."""
+    """Return fields where a place-name occurrence can support regional retrieval."""
     parts: list[str] = []
 
     def append_fields(record: dict[str, Any]) -> None:
@@ -219,6 +223,70 @@ def exact_region_candidates(
                 {"label_path": label_path, "matched_name": matched_name}
             )
     return matches
+
+
+def region_phrase_evidence(
+    query: str,
+    labels: list[dict[str, Any]],
+    region_indices: list[int],
+) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for index in region_indices:
+        label = labels[index]
+        label_path = label["label_path"]
+        label_name = label_path.rsplit("@", 1)[-1]
+        fields = {
+            "direct_names": label.get("exact_names") or [label_name],
+            "contained_places": label.get("contained_places") or [],
+            "representative_places": label.get("representative_places") or [],
+        }
+        matched = {
+            field: list(
+                dict.fromkeys(
+                    name for name in names if name and name in query
+                )
+            )
+            for field, names in fields.items()
+        }
+        if any(matched.values()):
+            evidence.append({"label_path": label_path, **matched})
+    return evidence
+
+
+def admitted_region_label_paths(
+    bm25_candidates: list[dict[str, Any]],
+    bge_candidates: list[dict[str, Any]],
+    phrase_evidence: list[dict[str, Any]],
+) -> set[str]:
+    bm25_ranks = {
+        item["label_path"]: item["rank"] for item in bm25_candidates
+    }
+    bge_ranks = {
+        item["label_path"]: item["rank"] for item in bge_candidates
+    }
+    evidence_by_label = {
+        item["label_path"]: item for item in phrase_evidence
+    }
+    admitted: set[str] = set()
+    for label_path in bm25_ranks.keys() | bge_ranks.keys() | evidence_by_label.keys():
+        item = evidence_by_label.get(label_path, {})
+        has_direct_evidence = bool(item.get("direct_names"))
+        has_contained_place = bool(item.get("contained_places"))
+        representative_count = len(item.get("representative_places") or [])
+        has_dual_route_support = (
+            bm25_ranks.get(label_path, REGION_DUAL_ROUTE_MAX_RANK + 1)
+            <= REGION_DUAL_ROUTE_MAX_RANK
+            and bge_ranks.get(label_path, REGION_DUAL_ROUTE_MAX_RANK + 1)
+            <= REGION_DUAL_ROUTE_MAX_RANK
+        )
+        if (
+            has_direct_evidence
+            or has_contained_place
+            or representative_count >= REGION_MIN_REPRESENTATIVE_MATCHES
+            or has_dual_route_support
+        ):
+            admitted.add(label_path)
+    return admitted
 
 
 def encode_queries(
@@ -602,10 +670,30 @@ def run_retrieval(
                 region_labels,
                 region_indices,
             )
+            regional_phrase_evidence = region_phrase_evidence(
+                question_region_exact_text(question),
+                region_labels,
+                region_indices,
+            )
+            admitted_region_labels = admitted_region_label_paths(
+                regional_sparse,
+                regional_dense,
+                regional_phrase_evidence,
+            )
+            regional_sparse_admitted = [
+                item
+                for item in regional_sparse
+                if item["label_path"] in admitted_region_labels
+            ]
+            regional_dense_admitted = [
+                item
+                for item in regional_dense
+                if item["label_path"] in admitted_region_labels
+            ]
             regional_fused = rank_fused_candidates(
                 {
-                    "region_bm25": regional_sparse,
-                    "region_bge": regional_dense,
+                    "region_bm25": regional_sparse_admitted,
+                    "region_bge": regional_dense_admitted,
                 },
                 exact_matches=regional_exact,
                 agreement_weight=agreement_weight,
@@ -667,6 +755,7 @@ def run_retrieval(
                     if label not in nonregional_final_labels
                 ],
                 "regional_exact_matches": regional_exact,
+                "regional_phrase_evidence": regional_phrase_evidence,
                 "regional_bm25_candidates": regional_sparse_full[
                     :REGION_DIAGNOSTIC_LIMIT
                 ],
