@@ -4,6 +4,7 @@ import pytest
 
 from bio_geo_tagging.build_retrieval_index import (
     build_bm25_index,
+    build_region_phrase_bm25_index,
     load_retrieval_records,
     parse_ngram_sizes,
     tokenize_char_ngrams,
@@ -19,6 +20,8 @@ def test_load_retrieval_records_preserves_exact_names(tmp_path):
                 "bm25_text": "英国 大不列颠",
                 "embedding_text": "英国，也称大不列颠。",
                 "exact_names": ["英国", "大不列颠"],
+                "contained_places": ["英格兰"],
+                "representative_places": ["伦敦"],
             },
             ensure_ascii=False,
         )
@@ -29,6 +32,8 @@ def test_load_retrieval_records_preserves_exact_names(tmp_path):
         "英国",
         "大不列颠",
     ]
+    assert load_retrieval_records(path)[0]["contained_places"] == ["英格兰"]
+    assert load_retrieval_records(path)[0]["representative_places"] == ["伦敦"]
 
 
 def test_parse_ngram_sizes_sorts_and_deduplicates():
@@ -74,6 +79,27 @@ def test_build_bm25_index_creates_postings_and_positive_idf():
     assert index["postings"]["温度"] == [[0, 1]]
     assert index["postings"]["盐度"] == [[1, 1]]
     assert index["idf"]["海水"] > 0
+
+
+def test_region_phrase_bm25_uses_complete_names_only():
+    records = [
+        {
+            "label_path": "北京",
+            "exact_names": ["北京", "北京市"],
+            "contained_places": ["东城区"],
+        },
+        {
+            "label_path": "黄淮海平原",
+            "exact_names": ["黄淮海平原", "华北平原"],
+            "contained_places": ["河北平原"],
+        },
+    ]
+    index = build_region_phrase_bm25_index(records, 1.5, 0.75)
+
+    assert index["tokenizer"] == "region_phrase"
+    assert "北京" in index["postings"]
+    assert "华北平原" in index["postings"]
+    assert "北平" not in index["postings"]
 
 
 def test_load_retrieval_records_rejects_duplicate_path(tmp_path):

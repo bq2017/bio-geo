@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from .build_retrieval_index import tokenize_char_ngrams
+from .build_retrieval_index import normalize_phrase, tokenize_char_ngrams
 
 
 QUESTION_TEXT_FIELDS = (
@@ -161,7 +161,16 @@ def load_index(
 
 def bm25_scores(query: str, index: dict[str, Any]) -> list[float]:
     scores = [0.0] * int(index["document_count"])
-    terms = set(tokenize_char_ngrams(query, tuple(index["ngram_sizes"])))
+    tokenizer = index.get("tokenizer")
+    if tokenizer == "unicode_char_ngram":
+        terms = set(tokenize_char_ngrams(query, tuple(index["ngram_sizes"])))
+    elif tokenizer == "region_phrase":
+        normalized_query = normalize_phrase(query)
+        terms = {
+            phrase for phrase in index["idf"] if phrase in normalized_query
+        }
+    else:
+        raise ValueError(f"不支持的BM25分词器：{tokenizer}")
     k1 = float(index["k1"])
     b = float(index["b"])
     average_length = float(index["average_document_length"])
@@ -566,6 +575,12 @@ def run_retrieval(
             region_bm25,
             region_embeddings,
         ) = load_index(region_index_dir)
+        region_tokenizer = region_bm25.get("tokenizer")
+        if region_tokenizer != "region_phrase":
+            raise ValueError(
+                "区域索引必须使用完整短语BM25；"
+                f"当前分词器为{region_tokenizer}"
+            )
         actual_region_paths = {record["label_path"] for record in region_labels}
         if actual_region_paths != expected_region_paths:
             missing = sorted(expected_region_paths - actual_region_paths)
@@ -834,7 +849,7 @@ def main() -> None:
     )
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--index-dir", type=Path, required=True)
-    parser.add_argument("--region-index-dir", type=Path)
+    parser.add_argument("--region-index-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--summary-output", type=Path, required=True)
     parser.add_argument("--nonregion-candidate-limit", type=int, default=25)

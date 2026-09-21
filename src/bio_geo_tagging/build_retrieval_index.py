@@ -15,6 +15,12 @@ from typing import Any, Iterable
 
 INDEX_VERSION = 1
 TEXT_SEGMENT_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+|[a-z0-9°%≈.+/\-]+")
+RETRIEVAL_LIST_FIELDS = (
+    "exact_names",
+    "contained_places",
+    "representative_places",
+    "parent_regions",
+)
 
 
 def parse_ngram_sizes(value: str) -> tuple[int, ...]:
@@ -67,17 +73,18 @@ def load_retrieval_records(path: Path) -> list[dict[str, Any]]:
                 "bm25_text": bm25_text,
                 "embedding_text": embedding_text,
             }
-            exact_names = value.get("exact_names")
-            if exact_names is not None:
-                if not isinstance(exact_names, list) or not all(
-                    isinstance(item, str) and item.strip() for item in exact_names
-                ):
-                    raise ValueError(
-                        f"第{line_number}行exact_names必须是非空字符串数组"
+            for field in RETRIEVAL_LIST_FIELDS:
+                items = value.get(field)
+                if items is not None:
+                    if not isinstance(items, list) or not all(
+                        isinstance(item, str) and item.strip() for item in items
+                    ):
+                        raise ValueError(
+                            f"第{line_number}行{field}必须是非空字符串数组"
+                        )
+                    record[field] = list(
+                        dict.fromkeys(item.strip() for item in items)
                     )
-                record["exact_names"] = list(
-                    dict.fromkeys(item.strip() for item in exact_names)
-                )
             records.append(record)
     if not records:
         raise ValueError("检索文本文件中没有可用标签")
@@ -85,8 +92,62 @@ def load_retrieval_records(path: Path) -> list[dict[str, Any]]:
 
 
 def build_bm25_index(
-    records: list[dict[str, str]],
+    records: list[dict[str, Any]],
     ngram_sizes: tuple[int, ...],
+    k1: float,
+    b: float,
+) -> dict[str, Any]:
+    token_lists = [
+        tokenize_char_ngrams(record["bm25_text"], ngram_sizes)
+        for record in records
+    ]
+    index = build_token_bm25_index(
+        records,
+        token_lists,
+        tokenizer="unicode_char_ngram",
+        k1=k1,
+        b=b,
+    )
+    index["ngram_sizes"] = list(ngram_sizes)
+    return index
+
+
+def normalize_phrase(value: str) -> str:
+    return unicodedata.normalize("NFKC", value).lower().strip()
+
+
+def region_phrase_tokens(record: dict[str, Any]) -> list[str]:
+    phrases = [
+        *record.get("exact_names", []),
+        *record.get("contained_places", []),
+    ]
+    return list(
+        dict.fromkeys(
+            normalized
+            for phrase in phrases
+            if (normalized := normalize_phrase(phrase))
+        )
+    )
+
+
+def build_region_phrase_bm25_index(
+    records: list[dict[str, Any]],
+    k1: float,
+    b: float,
+) -> dict[str, Any]:
+    return build_token_bm25_index(
+        records,
+        [region_phrase_tokens(record) for record in records],
+        tokenizer="region_phrase",
+        k1=k1,
+        b=b,
+    )
+
+
+def build_token_bm25_index(
+    records: list[dict[str, Any]],
+    token_lists: list[list[str]],
+    tokenizer: str,
     k1: float,
     b: float,
 ) -> dict[str, Any]:
@@ -94,12 +155,13 @@ def build_bm25_index(
         raise ValueError("BM25参数k1必须大于0")
     if not 0 <= b <= 1:
         raise ValueError("BM25参数b必须位于0到1之间")
+    if len(token_lists) != len(records):
+        raise ValueError("BM25分词结果数量与标签数量不一致")
 
     term_frequencies: list[Counter[str]] = []
     document_frequencies: Counter[str] = Counter()
     document_lengths: list[int] = []
-    for record in records:
-        tokens = tokenize_char_ngrams(record["bm25_text"], ngram_sizes)
+    for record, tokens in zip(records, token_lists):
         if not tokens:
             raise ValueError(f"BM25分词结果为空：{record['label_path']}")
         frequencies = Counter(tokens)
@@ -125,8 +187,7 @@ def build_bm25_index(
 
     return {
         "version": INDEX_VERSION,
-        "tokenizer": "unicode_char_ngram",
-        "ngram_sizes": list(ngram_sizes),
+        "tokenizer": tokenizer,
         "document_count": document_count,
         "k1": k1,
         "b": b,
@@ -208,14 +269,15 @@ def write_label_mapping(path: Path, records: Iterable[dict[str, Any]]) -> None:
                 "bm25_text": record["bm25_text"],
                 "embedding_text": record["embedding_text"],
             }
-            if "exact_names" in record:
-                mapping["exact_names"] = record["exact_names"]
+            for field in RETRIEVAL_LIST_FIELDS:
+                if field in record:
+                    mapping[field] = record[field]
             handle.write(json.dumps(mapping, ensure_ascii=False) + "\n")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Build cached character-BM25 and BGE label indexes"
+        description="Build cached BM25 and BGE label indexes"
     )
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -228,6 +290,11 @@ def main() -> None:
     )
     parser.add_argument("--device")
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument(
+        "--bm25-tokenizer",
+        choices=("char_ngram", "region_phrase"),
+        default="char_ngram",
+    )
     parser.add_argument("--char-ngrams", type=parse_ngram_sizes, default=(1, 2))
     parser.add_argument("--bm25-k1", type=float, default=1.5)
     parser.add_argument("--bm25-b", type=float, default=0.75)
@@ -249,12 +316,19 @@ def main() -> None:
     manifest_path = args.output_dir / "manifest.json"
 
     write_label_mapping(labels_path, records)
-    bm25_index = build_bm25_index(
-        records,
-        args.char_ngrams,
-        args.bm25_k1,
-        args.bm25_b,
-    )
+    if args.bm25_tokenizer == "region_phrase":
+        bm25_index = build_region_phrase_bm25_index(
+            records,
+            args.bm25_k1,
+            args.bm25_b,
+        )
+    else:
+        bm25_index = build_bm25_index(
+            records,
+            args.char_ngrams,
+            args.bm25_k1,
+            args.bm25_b,
+        )
     write_json(bm25_path, bm25_index)
 
     embeddings = encode_bge_embeddings(
@@ -275,8 +349,7 @@ def main() -> None:
         "labels_file": labels_path.name,
         "bm25": {
             "file": bm25_path.name,
-            "tokenizer": "unicode_char_ngram",
-            "ngram_sizes": list(args.char_ngrams),
+            "tokenizer": bm25_index["tokenizer"],
             "k1": args.bm25_k1,
             "b": args.bm25_b,
         },
@@ -290,6 +363,8 @@ def main() -> None:
             "dimension": embedding_dimension,
         },
     }
+    if "ngram_sizes" in bm25_index:
+        manifest["bm25"]["ngram_sizes"] = bm25_index["ngram_sizes"]
     write_json(manifest_path, manifest)
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
 

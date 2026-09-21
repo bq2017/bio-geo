@@ -3,9 +3,14 @@ from pathlib import Path
 
 import pytest
 
-from bio_geo_tagging.build_retrieval_index import build_bm25_index, write_json
+from bio_geo_tagging.build_retrieval_index import (
+    build_bm25_index,
+    build_region_phrase_bm25_index,
+    write_json,
+)
 from bio_geo_tagging.hybrid_candidate_retrieval import (
     admitted_region_label_paths,
+    bm25_scores,
     exact_region_candidates,
     fuse_candidates,
     is_region_label_path,
@@ -130,6 +135,26 @@ def test_region_admission_requires_direct_or_multiple_weak_clues():
     assert labels[1]["label_path"] not in admitted
 
 
+def test_region_phrase_bm25_does_not_match_character_fragments():
+    records = [
+        {
+            "label_path": "北京",
+            "exact_names": ["北京", "北京市"],
+            "contained_places": ["东城区"],
+        },
+        {
+            "label_path": "黄淮海平原",
+            "exact_names": ["黄淮海平原", "华北平原"],
+            "contained_places": ["河北平原"],
+        },
+    ]
+    index = build_region_phrase_bm25_index(records, 1.5, 0.75)
+    scores = bm25_scores("太行山是黄土高原和华北平原的分界线", index)
+
+    assert scores[0] == 0
+    assert scores[1] > 0
+
+
 def test_fusion_keeps_both_routes_and_deduplicates():
     bm25 = [
         {"rank": 1, "label_path": "甲", "score": 2.0},
@@ -246,7 +271,7 @@ def make_region_index(index_dir: Path) -> None:
             )
     write_json(
         index_dir / "bm25-index.json",
-        build_bm25_index(records, (2,), 1.5, 0.75),
+        build_region_phrase_bm25_index(records, 1.5, 0.75),
     )
     np.save(
         index_dir / "bge-embeddings.npy",
