@@ -188,9 +188,18 @@ def exact_region_candidates(
     for index in region_indices:
         label_path = labels[index]["label_path"]
         label_name = label_path.rsplit("@", 1)[-1]
-        if label_name and label_name in query:
+        exact_names = labels[index].get("exact_names") or [label_name]
+        matched_name = next(
+            (
+                name
+                for name in sorted(exact_names, key=len, reverse=True)
+                if name and name in query
+            ),
+            None,
+        )
+        if matched_name:
             matches.append(
-                {"label_path": label_path, "matched_name": label_name}
+                {"label_path": label_path, "matched_name": matched_name}
             )
     return matches
 
@@ -340,6 +349,7 @@ def run_retrieval(
     batch_size: int,
     device: str | None,
     embedding_model: str | None,
+    region_index_dir: Path | None = None,
     region_top_k: int = 20,
     region_recall_ks: tuple[int, ...] = DEFAULT_REGION_RECALL_KS,
     query_encoder: Callable[[list[str], str, str, int, str | None], Any] = encode_queries,
@@ -347,6 +357,10 @@ def run_retrieval(
     if bm25_top_k <= 0 or bge_top_k <= 0 or region_top_k <= 0:
         raise ValueError("两路top-k必须大于0")
     manifest, labels, bm25, label_embeddings = load_index(index_dir)
+    region_manifest: dict[str, Any] | None = None
+    region_labels: list[dict[str, Any]]
+    region_bm25: dict[str, Any]
+    region_embeddings: Any
     questions: list[dict[str, Any]] = []
     query_texts: list[str] = []
     for line_number, question in read_jsonl(input_path):
@@ -365,13 +379,53 @@ def run_retrieval(
         raise ValueError("题目向量数量与输入题目数量不一致")
 
     allowed_labels = {record["label_path"] for record in labels}
-    region_indices = [
+    global_region_indices = [
         index
         for index, record in enumerate(labels)
         if is_region_label_path(record["label_path"])
     ]
-    if not region_indices:
+    if not global_region_indices:
         raise ValueError("标签索引中没有识别到中国地理或世界地理区域标签")
+    expected_region_paths = {
+        labels[index]["label_path"] for index in global_region_indices
+    }
+    if region_index_dir is None:
+        region_labels = labels
+        region_bm25 = bm25
+        region_embeddings = label_embeddings
+        region_indices = global_region_indices
+        region_query_embeddings = query_embeddings
+    else:
+        (
+            region_manifest,
+            region_labels,
+            region_bm25,
+            region_embeddings,
+        ) = load_index(region_index_dir)
+        actual_region_paths = {record["label_path"] for record in region_labels}
+        if actual_region_paths != expected_region_paths:
+            missing = sorted(expected_region_paths - actual_region_paths)
+            extra = sorted(actual_region_paths - expected_region_paths)
+            raise ValueError(
+                f"区域索引与全量索引中的区域标签不一致；缺少={missing}；多出={extra}"
+            )
+        region_indices = list(range(len(region_labels)))
+        region_model = region_manifest["embedding"]["model"]
+        region_instruction = region_manifest["embedding"].get(
+            "query_instruction", ""
+        )
+        if region_model == model_name and region_instruction == instruction:
+            region_query_embeddings = query_embeddings
+        else:
+            region_query_embeddings = query_encoder(
+                query_texts,
+                region_model,
+                region_instruction,
+                batch_size,
+                device,
+            )
+        if region_query_embeddings.shape[1] != region_embeddings.shape[1]:
+            raise ValueError("区域题目向量与区域标签向量维度不一致")
     effective_region_ks = tuple(
         sorted({value for value in region_recall_ks if 0 < value <= region_top_k})
     )
@@ -408,26 +462,36 @@ def run_retrieval(
                 labels,
             )
             fused = fuse_candidates(sparse, dense)
+            regional_sparse_scores = (
+                sparse_scores
+                if region_index_dir is None
+                else bm25_scores(query, region_bm25)
+            )
+            regional_dense_scores = (
+                dense_scores
+                if region_index_dir is None
+                else region_embeddings @ region_query_embeddings[index]
+            )
             regional_sparse_full = ranked_candidates(
                 top_indices_from_pool(
-                    sparse_scores,
+                    regional_sparse_scores,
                     region_indices,
                     min(region_top_k, len(region_indices)),
                 ),
-                sparse_scores,
-                labels,
+                regional_sparse_scores,
+                region_labels,
             )
             regional_dense_full = ranked_candidates(
                 top_indices_from_pool(
-                    dense_scores,
+                    regional_dense_scores,
                     region_indices,
                     min(region_top_k, len(region_indices)),
                 ),
-                dense_scores,
-                labels,
+                regional_dense_scores,
+                region_labels,
             )
             regional_exact = exact_region_candidates(
-                query, labels, region_indices
+                query, region_labels, region_indices
             )
             regional_fused = add_exact_region_matches(
                 fuse_candidates(regional_sparse_full, regional_dense_full),
@@ -516,6 +580,7 @@ def run_retrieval(
         "bm25_top_k": bm25_top_k,
         "bge_top_k": bge_top_k,
         "regional_label_count": len(region_indices),
+        "regional_index": str(region_index_dir) if region_index_dir else None,
         "region_top_k": region_top_k,
         "embedding_model": model_name,
         "metrics": {name: finalize_metrics(value) for name, value in metrics.items()},
@@ -565,6 +630,7 @@ def main() -> None:
     )
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--index-dir", type=Path, required=True)
+    parser.add_argument("--region-index-dir", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--summary-output", type=Path, required=True)
     parser.add_argument("--bm25-top-k", type=int, default=50)
@@ -580,6 +646,7 @@ def main() -> None:
     summary = run_retrieval(
         input_path=args.input,
         index_dir=args.index_dir,
+        region_index_dir=args.region_index_dir,
         output_path=args.output,
         summary_path=args.summary_output,
         bm25_top_k=args.bm25_top_k,

@@ -40,6 +40,21 @@ def test_exact_region_candidates_uses_leaf_name():
     ]
 
 
+def test_exact_region_candidates_uses_aliases():
+    labels = [
+        {
+            "label_path": "知识点@世界地理@世界重要的国家@英国",
+            "exact_names": ["英国", "大不列颠", "英伦"],
+        }
+    ]
+    assert exact_region_candidates("读大不列颠岛地形图", labels, [0]) == [
+        {
+            "label_path": "知识点@世界地理@世界重要的国家@英国",
+            "matched_name": "大不列颠",
+        }
+    ]
+
+
 def test_question_text_and_gold_cover_root_and_subquestions():
     question = {
         "stem": "公共材料",
@@ -110,6 +125,56 @@ def make_index(index_dir: Path) -> None:
     )
 
 
+def make_region_index(index_dir: Path) -> None:
+    np = pytest.importorskip("numpy")
+    records = [
+        {
+            "label_path": "知识点@中国地理@中国地理微区域@甲地",
+            "bm25_text": "甲地",
+            "embedding_text": "区域名称：甲地。",
+            "exact_names": ["甲地"],
+        },
+        {
+            "label_path": "知识点@世界地理@世界重要的国家@丙国",
+            "bm25_text": "丙国 丙岛",
+            "embedding_text": "区域名称：丙国。别称：丙岛。",
+            "exact_names": ["丙国", "丙岛"],
+        },
+    ]
+    index_dir.mkdir()
+    with (index_dir / "labels.jsonl").open("w", encoding="utf-8") as handle:
+        for document_index, record in enumerate(records):
+            handle.write(
+                json.dumps(
+                    {"document_index": document_index, **record},
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    write_json(
+        index_dir / "bm25-index.json",
+        build_bm25_index(records, (2,), 1.5, 0.75),
+    )
+    np.save(
+        index_dir / "bge-embeddings.npy",
+        np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+        allow_pickle=False,
+    )
+    write_json(
+        index_dir / "manifest.json",
+        {
+            "label_count": 2,
+            "labels_file": "labels.jsonl",
+            "bm25": {"file": "bm25-index.json"},
+            "embedding": {
+                "file": "bge-embeddings.npy",
+                "model": "fake-model",
+                "query_instruction": "检索：",
+            },
+        },
+    )
+
+
 def test_run_retrieval_writes_results_and_route_metrics(tmp_path):
     np = pytest.importorskip("numpy")
     index_dir = tmp_path / "index"
@@ -163,3 +228,54 @@ def test_run_retrieval_writes_results_and_route_metrics(tmp_path):
     assert summary["metrics"]["fusion"]["full_coverage_rate"] == 1.0
     assert summary["regional_label_count"] == 2
     assert summary["metrics"]["combined"]["label_recall"] == 1.0
+
+
+def test_run_retrieval_uses_separate_region_index(tmp_path):
+    np = pytest.importorskip("numpy")
+    index_dir = tmp_path / "index"
+    region_index_dir = tmp_path / "region-index"
+    make_index(index_dir)
+    make_region_index(region_index_dir)
+    input_path = tmp_path / "questions.jsonl"
+    input_path.write_text(
+        json.dumps(
+            {
+                "parent_id": "1",
+                "question_id": "1",
+                "stem": "读丙岛地形图",
+                "options": "",
+                "analysis": "",
+                "knw_labels": ["知识点@世界地理@世界重要的国家@丙国"],
+                "sub_questions": [],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def fake_encoder(texts, model, instruction, batch_size, device):
+        return np.asarray([[1.0, 0.0]], dtype=np.float32)
+
+    output_path = tmp_path / "results.jsonl"
+    summary = run_retrieval(
+        input_path=input_path,
+        index_dir=index_dir,
+        region_index_dir=region_index_dir,
+        output_path=output_path,
+        summary_path=tmp_path / "summary.json",
+        bm25_top_k=1,
+        bge_top_k=1,
+        region_top_k=1,
+        batch_size=8,
+        device="cpu",
+        embedding_model=None,
+        query_encoder=fake_encoder,
+    )
+    result = json.loads(output_path.read_text(encoding="utf-8"))
+    expected = "知识点@世界地理@世界重要的国家@丙国"
+    assert result["regional_bm25_candidates"][0]["label_path"] == expected
+    assert result["regional_exact_matches"] == [
+        {"label_path": expected, "matched_name": "丙岛"}
+    ]
+    assert summary["regional_index"] == str(region_index_dir)

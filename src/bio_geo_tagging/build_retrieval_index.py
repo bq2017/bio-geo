@@ -42,8 +42,8 @@ def tokenize_char_ngrams(text: str, ngram_sizes: tuple[int, ...]) -> list[str]:
     return tokens
 
 
-def load_retrieval_records(path: Path) -> list[dict[str, str]]:
-    records: list[dict[str, str]] = []
+def load_retrieval_records(path: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
     with path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
@@ -62,13 +62,23 @@ def load_retrieval_records(path: Path) -> list[dict[str, str]]:
             if not embedding_text:
                 raise ValueError(f"第{line_number}行缺少embedding_text：{label_path}")
             seen_paths.add(label_path)
-            records.append(
-                {
-                    "label_path": label_path,
-                    "bm25_text": bm25_text,
-                    "embedding_text": embedding_text,
-                }
-            )
+            record: dict[str, Any] = {
+                "label_path": label_path,
+                "bm25_text": bm25_text,
+                "embedding_text": embedding_text,
+            }
+            exact_names = value.get("exact_names")
+            if exact_names is not None:
+                if not isinstance(exact_names, list) or not all(
+                    isinstance(item, str) and item.strip() for item in exact_names
+                ):
+                    raise ValueError(
+                        f"第{line_number}行exact_names必须是非空字符串数组"
+                    )
+                record["exact_names"] = list(
+                    dict.fromkeys(item.strip() for item in exact_names)
+                )
+            records.append(record)
     if not records:
         raise ValueError("检索文本文件中没有可用标签")
     return records
@@ -189,7 +199,7 @@ def write_json(path: Path, value: Any) -> None:
         handle.write("\n")
 
 
-def write_label_mapping(path: Path, records: Iterable[dict[str, str]]) -> None:
+def write_label_mapping(path: Path, records: Iterable[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8", newline="\n") as handle:
         for document_index, record in enumerate(records):
             mapping = {
@@ -198,6 +208,8 @@ def write_label_mapping(path: Path, records: Iterable[dict[str, str]]) -> None:
                 "bm25_text": record["bm25_text"],
                 "embedding_text": record["embedding_text"],
             }
+            if "exact_names" in record:
+                mapping["exact_names"] = record["exact_names"]
             handle.write(json.dumps(mapping, ensure_ascii=False) + "\n")
 
 

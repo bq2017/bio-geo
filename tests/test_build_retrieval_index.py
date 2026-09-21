@@ -10,6 +10,27 @@ from bio_geo_tagging.build_retrieval_index import (
 )
 
 
+def test_load_retrieval_records_preserves_exact_names(tmp_path):
+    path = tmp_path / "labels.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "label_path": "知识点@世界地理@世界重要的国家@英国",
+                "bm25_text": "英国 大不列颠",
+                "embedding_text": "英国，也称大不列颠。",
+                "exact_names": ["英国", "大不列颠"],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert load_retrieval_records(path)[0]["exact_names"] == [
+        "英国",
+        "大不列颠",
+    ]
+
+
 def test_parse_ngram_sizes_sorts_and_deduplicates():
     assert parse_ngram_sizes("2,1,2") == (1, 2)
     with pytest.raises(Exception):
