@@ -19,6 +19,15 @@ QUESTION_TEXT_FIELDS = (
     "image_description",
 )
 
+CHINA_REGION_BRANCHES = {"中国地理分区", "中国地理微区域"}
+WORLD_REGION_BRANCHES = {
+    "世界主要的大洲",
+    "世界重要的地区",
+    "世界重要的国家",
+    "世界地理微区域",
+}
+DEFAULT_REGION_RECALL_KS = (1, 3, 5, 10, 20)
+
 
 def read_jsonl(path: Path) -> Iterable[tuple[int, dict[str, Any]]]:
     with path.open("r", encoding="utf-8") as handle:
@@ -150,6 +159,42 @@ def top_indices(scores: Any, limit: int) -> list[int]:
     )[:limit]
 
 
+def is_region_label_path(label_path: str) -> bool:
+    parts = label_path.split("@")
+    if len(parts) < 4 or parts[0] != "知识点":
+        return False
+    if parts[1] == "中国地理":
+        return parts[2] in CHINA_REGION_BRANCHES
+    if parts[1] == "世界地理":
+        return parts[2] in WORLD_REGION_BRANCHES
+    return False
+
+
+def top_indices_from_pool(
+    scores: Any, document_indices: list[int], limit: int
+) -> list[int]:
+    return sorted(
+        document_indices,
+        key=lambda index: (-float(scores[index]), index),
+    )[:limit]
+
+
+def exact_region_candidates(
+    query: str,
+    labels: list[dict[str, Any]],
+    region_indices: list[int],
+) -> list[dict[str, str]]:
+    matches: list[dict[str, str]] = []
+    for index in region_indices:
+        label_path = labels[index]["label_path"]
+        label_name = label_path.rsplit("@", 1)[-1]
+        if label_name and label_name in query:
+            matches.append(
+                {"label_path": label_path, "matched_name": label_name}
+            )
+    return matches
+
+
 def encode_queries(
     texts: list[str],
     model_name_or_path: str,
@@ -214,6 +259,40 @@ def fuse_candidates(
     return [by_label[label] for label in order]
 
 
+def add_exact_region_matches(
+    candidates: list[dict[str, Any]],
+    exact_matches: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    by_label = {item["label_path"]: item for item in candidates}
+    result = list(candidates)
+    for match in exact_matches:
+        label = match["label_path"]
+        if label in by_label:
+            by_label[label]["exact_name_match"] = True
+            continue
+        item = {
+            "label_path": label,
+            "bm25_rank": None,
+            "bge_rank": None,
+            "exact_name_match": True,
+        }
+        result.append(item)
+        by_label[label] = item
+    return result
+
+
+def merge_candidate_lists(
+    primary: list[dict[str, Any]], secondary: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    result = list(primary)
+    seen = {item["label_path"] for item in result}
+    for item in secondary:
+        if item["label_path"] not in seen:
+            result.append(item)
+            seen.add(item["label_path"])
+    return result
+
+
 def metric_record() -> dict[str, int]:
     return {
         "questions_with_gold": 0,
@@ -261,9 +340,11 @@ def run_retrieval(
     batch_size: int,
     device: str | None,
     embedding_model: str | None,
+    region_top_k: int = 20,
+    region_recall_ks: tuple[int, ...] = DEFAULT_REGION_RECALL_KS,
     query_encoder: Callable[[list[str], str, str, int, str | None], Any] = encode_queries,
 ) -> dict[str, Any]:
-    if bm25_top_k <= 0 or bge_top_k <= 0:
+    if bm25_top_k <= 0 or bge_top_k <= 0 or region_top_k <= 0:
         raise ValueError("两路top-k必须大于0")
     manifest, labels, bm25, label_embeddings = load_index(index_dir)
     questions: list[dict[str, Any]] = []
@@ -284,9 +365,33 @@ def run_retrieval(
         raise ValueError("题目向量数量与输入题目数量不一致")
 
     allowed_labels = {record["label_path"] for record in labels}
-    metrics = {name: metric_record() for name in ("bm25", "bge", "fusion")}
+    region_indices = [
+        index
+        for index, record in enumerate(labels)
+        if is_region_label_path(record["label_path"])
+    ]
+    if not region_indices:
+        raise ValueError("标签索引中没有识别到中国地理或世界地理区域标签")
+    effective_region_ks = tuple(
+        sorted({value for value in region_recall_ks if 0 < value <= region_top_k})
+    )
+    if region_top_k not in effective_region_ks:
+        effective_region_ks += (region_top_k,)
+        effective_region_ks = tuple(sorted(effective_region_ks))
+
+    metrics = {
+        name: metric_record()
+        for name in ("bm25", "bge", "fusion", "combined")
+    }
+    regional_metrics = {
+        route: {value: metric_record() for value in effective_region_ks}
+        for route in ("bm25", "bge", "fusion")
+    }
+    regional_exact_metrics = metric_record()
     unknown_gold_labels: dict[str, int] = {}
     fused_counts: list[int] = []
+    regional_counts: list[int] = []
+    combined_counts: list[int] = []
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8", newline="\n") as output:
         for index, (question, query) in enumerate(zip(questions, query_texts)):
@@ -303,6 +408,32 @@ def run_retrieval(
                 labels,
             )
             fused = fuse_candidates(sparse, dense)
+            regional_sparse_full = ranked_candidates(
+                top_indices_from_pool(
+                    sparse_scores,
+                    region_indices,
+                    min(region_top_k, len(region_indices)),
+                ),
+                sparse_scores,
+                labels,
+            )
+            regional_dense_full = ranked_candidates(
+                top_indices_from_pool(
+                    dense_scores,
+                    region_indices,
+                    min(region_top_k, len(region_indices)),
+                ),
+                dense_scores,
+                labels,
+            )
+            regional_exact = exact_region_candidates(
+                query, labels, region_indices
+            )
+            regional_fused = add_exact_region_matches(
+                fuse_candidates(regional_sparse_full, regional_dense_full),
+                regional_exact,
+            )
+            combined = merge_candidate_lists(fused, regional_fused)
             gold = question_gold_labels(question)
             for label in gold:
                 if label not in allowed_labels:
@@ -311,10 +442,44 @@ def run_retrieval(
             sparse_labels = {item["label_path"] for item in sparse}
             dense_labels = {item["label_path"] for item in dense}
             fused_labels = {item["label_path"] for item in fused}
+            combined_labels = {item["label_path"] for item in combined}
             update_metrics(metrics["bm25"], known_gold, sparse_labels)
             update_metrics(metrics["bge"], known_gold, dense_labels)
             update_metrics(metrics["fusion"], known_gold, fused_labels)
+            update_metrics(metrics["combined"], known_gold, combined_labels)
+
+            regional_gold = [
+                label for label in known_gold if is_region_label_path(label)
+            ]
+            exact_labels = {item["label_path"] for item in regional_exact}
+            update_metrics(
+                regional_exact_metrics, regional_gold, exact_labels
+            )
+            for value in effective_region_ks:
+                regional_sparse_labels = {
+                    item["label_path"] for item in regional_sparse_full[:value]
+                }
+                regional_dense_labels = {
+                    item["label_path"] for item in regional_dense_full[:value]
+                }
+                update_metrics(
+                    regional_metrics["bm25"][value],
+                    regional_gold,
+                    regional_sparse_labels,
+                )
+                update_metrics(
+                    regional_metrics["bge"][value],
+                    regional_gold,
+                    regional_dense_labels,
+                )
+                update_metrics(
+                    regional_metrics["fusion"][value],
+                    regional_gold,
+                    regional_sparse_labels | regional_dense_labels | exact_labels,
+                )
             fused_counts.append(len(fused))
+            regional_counts.append(len(regional_fused))
+            combined_counts.append(len(combined))
             result = {
                 "question_id": as_text(question.get("question_id")),
                 "parent_id": as_text(question.get("parent_id")),
@@ -334,6 +499,14 @@ def run_retrieval(
                 "fusion_missing_labels": [
                     label for label in known_gold if label not in fused_labels
                 ],
+                "regional_exact_matches": regional_exact,
+                "regional_bm25_candidates": regional_sparse_full,
+                "regional_bge_candidates": regional_dense_full,
+                "regional_fused_candidates": regional_fused,
+                "combined_candidates": combined,
+                "combined_missing_labels": [
+                    label for label in known_gold if label not in combined_labels
+                ],
             }
             output.write(json.dumps(result, ensure_ascii=False) + "\n")
 
@@ -342,14 +515,40 @@ def run_retrieval(
         "label_count": len(labels),
         "bm25_top_k": bm25_top_k,
         "bge_top_k": bge_top_k,
+        "regional_label_count": len(region_indices),
+        "region_top_k": region_top_k,
         "embedding_model": model_name,
         "metrics": {name: finalize_metrics(value) for name, value in metrics.items()},
+        "regional_metrics": {
+            "exact_name_match": finalize_metrics(regional_exact_metrics),
+            **{
+                route: {
+                    str(value): finalize_metrics(route_metrics[value])
+                    for value in effective_region_ks
+                }
+                for route, route_metrics in regional_metrics.items()
+            },
+        },
         "fused_candidate_count": {
             "average": round(sum(fused_counts) / len(fused_counts), 6)
             if fused_counts
             else None,
             "minimum": min(fused_counts) if fused_counts else None,
             "maximum": max(fused_counts) if fused_counts else None,
+        },
+        "regional_candidate_count": {
+            "average": round(sum(regional_counts) / len(regional_counts), 6)
+            if regional_counts
+            else None,
+            "minimum": min(regional_counts) if regional_counts else None,
+            "maximum": max(regional_counts) if regional_counts else None,
+        },
+        "combined_candidate_count": {
+            "average": round(sum(combined_counts) / len(combined_counts), 6)
+            if combined_counts
+            else None,
+            "minimum": min(combined_counts) if combined_counts else None,
+            "maximum": max(combined_counts) if combined_counts else None,
         },
         "unknown_gold_label_counts": unknown_gold_labels,
     }
@@ -370,6 +569,7 @@ def main() -> None:
     parser.add_argument("--summary-output", type=Path, required=True)
     parser.add_argument("--bm25-top-k", type=int, default=50)
     parser.add_argument("--bge-top-k", type=int, default=50)
+    parser.add_argument("--region-top-k", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--device")
     parser.add_argument("--embedding-model")
@@ -387,6 +587,7 @@ def main() -> None:
         batch_size=args.batch_size,
         device=args.device,
         embedding_model=args.embedding_model,
+        region_top_k=args.region_top_k,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 

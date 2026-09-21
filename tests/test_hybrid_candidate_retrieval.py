@@ -5,11 +5,39 @@ import pytest
 
 from bio_geo_tagging.build_retrieval_index import build_bm25_index, write_json
 from bio_geo_tagging.hybrid_candidate_retrieval import (
+    exact_region_candidates,
     fuse_candidates,
+    is_region_label_path,
     question_gold_labels,
     question_query_text,
     run_retrieval,
 )
+
+
+def test_region_label_path_classification():
+    assert is_region_label_path(
+        "知识点@中国地理@中国地理微区域@云贵高原"
+    )
+    assert is_region_label_path(
+        "知识点@世界地理@世界重要的国家@美国"
+    )
+    assert not is_region_label_path(
+        "知识点@中国地理@中国地理全貌@中国农业"
+    )
+    assert not is_region_label_path("知识点@自然地理@地貌@地貌观察")
+
+
+def test_exact_region_candidates_uses_leaf_name():
+    labels = [
+        {"label_path": "知识点@世界地理@世界重要的国家@美国"},
+        {"label_path": "知识点@人文地理@农业@农业区位"},
+    ]
+    assert exact_region_candidates("分析美国产业结构", labels, [0]) == [
+        {
+            "label_path": "知识点@世界地理@世界重要的国家@美国",
+            "matched_name": "美国",
+        }
+    ]
 
 
 def test_question_text_and_gold_cover_root_and_subquestions():
@@ -53,9 +81,9 @@ def test_fusion_keeps_both_routes_and_deduplicates():
 def make_index(index_dir: Path) -> None:
     np = pytest.importorskip("numpy")
     records = [
-        {"label_path": "知识点@甲", "bm25_text": "河流 水文", "embedding_text": "河流水文"},
+        {"label_path": "知识点@中国地理@中国地理微区域@甲地", "bm25_text": "甲地 河流 水文", "embedding_text": "甲地河流水文"},
         {"label_path": "知识点@乙", "bm25_text": "农业 区位", "embedding_text": "农业区位"},
-        {"label_path": "知识点@丙", "bm25_text": "城市 空间", "embedding_text": "城市空间"},
+        {"label_path": "知识点@世界地理@世界重要的国家@丙国", "bm25_text": "丙国 城市 空间", "embedding_text": "丙国城市空间"},
     ]
     index_dir.mkdir()
     with (index_dir / "labels.jsonl").open("w", encoding="utf-8") as handle:
@@ -95,7 +123,7 @@ def test_run_retrieval_writes_results_and_route_metrics(tmp_path):
                 "stem": "河流水文特征",
                 "options": "",
                 "analysis": "",
-                "knw_labels": ["知识点@甲"],
+                "knw_labels": ["知识点@中国地理@中国地理微区域@甲地"],
                 "sub_questions": [],
             },
             ensure_ascii=False,
@@ -121,13 +149,17 @@ def test_run_retrieval_writes_results_and_route_metrics(tmp_path):
         batch_size=8,
         device="cpu",
         embedding_model=None,
+        region_top_k=1,
         query_encoder=fake_encoder,
     )
     result = json.loads(output_path.read_text(encoding="utf-8"))
-    assert result["bm25_candidates"][0]["label_path"] == "知识点@甲"
-    assert result["bge_candidates"][0]["label_path"] == "知识点@甲"
+    expected = "知识点@中国地理@中国地理微区域@甲地"
+    assert result["bm25_candidates"][0]["label_path"] == expected
+    assert result["bge_candidates"][0]["label_path"] == expected
     assert result["bm25_missing_labels"] == []
     assert result["bge_missing_labels"] == []
     assert result["fusion_missing_labels"] == []
     assert summary["metrics"]["fusion"]["label_recall"] == 1.0
     assert summary["metrics"]["fusion"]["full_coverage_rate"] == 1.0
+    assert summary["regional_label_count"] == 2
+    assert summary["metrics"]["combined"]["label_recall"] == 1.0
