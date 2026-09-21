@@ -27,9 +27,14 @@ question-label-match = "bio_geo_tagging.question_label_match:main"
 question-label-analysis = "bio_geo_tagging.label_match_analysis:main"
 question-label-diagnose = "bio_geo_tagging.label_definition_diagnosis:main"
 label-retrieval-texts = "bio_geo_tagging.build_retrieval_texts:main"
+label-retrieval-index = "bio_geo_tagging.build_retrieval_index:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+retrieval = [
+    "numpy>=1.26",
+    "sentence-transformers>=3.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
