@@ -100,7 +100,7 @@ def test_region_exact_text_includes_analysis_but_excludes_options():
     assert "A.非洲 B.北美洲" not in text
 
 
-def test_region_admission_requires_direct_or_multiple_weak_clues():
+def test_region_admission_uses_single_place_only_with_strong_bge_support():
     labels = [
         {
             "label_path": "知识点@中国地理@中国地理微区域@黄淮海平原",
@@ -133,6 +133,16 @@ def test_region_admission_requires_direct_or_multiple_weak_clues():
     )
     assert labels[0]["label_path"] in admitted
     assert labels[1]["label_path"] not in admitted
+
+
+def test_region_admission_keeps_top_five_bge_as_semantic_fallback():
+    label = "知识点@世界地理@世界重要的地区@北欧"
+    admitted = admitted_region_label_paths(
+        [],
+        [{"rank": 2, "label_path": label, "score": 0.59}],
+        [],
+    )
+    assert admitted == {label}
 
 
 def test_region_phrase_bm25_does_not_match_character_fragments():
@@ -183,14 +193,45 @@ def test_region_fusion_applies_strict_limit():
     result = rank_region_candidates(
         bm25,
         bge,
-        [{"label_path": "丙", "matched_name": "丙地"}],
+        [
+            {
+                "label_path": "丙",
+                "direct_names": ["丙地"],
+                "contained_places": [],
+                "representative_places": [],
+            }
+        ],
         limit=2,
     )
     assert {item["label_path"] for item in result} == {"乙", "丙"}
-    assert next(item for item in result if item["label_path"] == "丙")[
-        "matched_name"
-    ] == "丙地"
+    assert result[0]["label_path"] == "丙"
+    assert result[0]["matched_direct_names"] == ["丙地"]
     assert len(result) == 2
+
+
+def test_region_ranking_uses_evidence_tiers_before_route_ranks():
+    bm25 = [
+        {"rank": 1, "label_path": "语义候选", "score": 2.0},
+        {"rank": 8, "label_path": "直接地名", "score": 0.5},
+    ]
+    bge = [
+        {"rank": 1, "label_path": "语义候选", "score": 0.7},
+        {"rank": 8, "label_path": "直接地名", "score": 0.5},
+    ]
+    result = rank_region_candidates(
+        bm25,
+        bge,
+        [
+            {
+                "label_path": "直接地名",
+                "direct_names": ["直接地名"],
+                "contained_places": [],
+                "representative_places": [],
+            }
+        ],
+        limit=2,
+    )
+    assert [item["label_path"] for item in result] == ["直接地名", "语义候选"]
 
 
 def test_fusion_keeps_strong_single_route_above_two_weak_routes():

@@ -36,8 +36,8 @@ WORLD_REGION_BRANCHES = {
 }
 NONREGION_DIAGNOSTIC_LIMIT = 50
 REGION_DIAGNOSTIC_LIMIT = 20
-REGION_DUAL_ROUTE_MAX_RANK = 10
-REGION_MIN_REPRESENTATIVE_MATCHES = 2
+REGION_REPRESENTATIVE_BGE_MAX_RANK = 10
+REGION_BGE_ONLY_MAX_RANK = 5
 
 
 def read_jsonl(path: Path) -> Iterable[tuple[int, dict[str, Any]]]:
@@ -281,18 +281,21 @@ def admitted_region_label_paths(
         item = evidence_by_label.get(label_path, {})
         has_direct_evidence = bool(item.get("direct_names"))
         has_contained_place = bool(item.get("contained_places"))
-        representative_count = len(item.get("representative_places") or [])
-        has_dual_route_support = (
-            bm25_ranks.get(label_path, REGION_DUAL_ROUTE_MAX_RANK + 1)
-            <= REGION_DUAL_ROUTE_MAX_RANK
-            and bge_ranks.get(label_path, REGION_DUAL_ROUTE_MAX_RANK + 1)
-            <= REGION_DUAL_ROUTE_MAX_RANK
+        has_representative_place = bool(item.get("representative_places"))
+        bge_rank = bge_ranks.get(label_path)
+        has_supported_representative_place = (
+            has_representative_place
+            and bge_rank is not None
+            and bge_rank <= REGION_REPRESENTATIVE_BGE_MAX_RANK
+        )
+        has_strong_bge_support = (
+            bge_rank is not None and bge_rank <= REGION_BGE_ONLY_MAX_RANK
         )
         if (
             has_direct_evidence
             or has_contained_place
-            or representative_count >= REGION_MIN_REPRESENTATIVE_MATCHES
-            or has_dual_route_support
+            or has_supported_representative_place
+            or has_strong_bge_support
         ):
             admitted.add(label_path)
     return admitted
@@ -439,19 +442,60 @@ def rank_fused_candidates(
 def rank_region_candidates(
     bm25_candidates: list[dict[str, Any]],
     bge_candidates: list[dict[str, Any]],
-    exact_matches: list[dict[str, str]],
+    phrase_evidence: list[dict[str, Any]],
     limit: int,
-    agreement_weight: float = 0.25,
 ) -> list[dict[str, Any]]:
-    return rank_fused_candidates(
-        {
-            "region_bm25": bm25_candidates,
-            "region_bge": bge_candidates,
-        },
-        exact_matches=exact_matches,
-        agreement_weight=agreement_weight,
-        limit=limit,
+    """Rank admitted regions by evidence type, then semantic rank."""
+    bm25_by_label = {item["label_path"]: item for item in bm25_candidates}
+    bge_by_label = {item["label_path"]: item for item in bge_candidates}
+    evidence_by_label = {
+        item["label_path"]: item for item in phrase_evidence
+    }
+    admitted = admitted_region_label_paths(
+        bm25_candidates,
+        bge_candidates,
+        phrase_evidence,
     )
+    ranked: list[dict[str, Any]] = []
+    for label_path in admitted:
+        bm25 = bm25_by_label.get(label_path)
+        bge = bge_by_label.get(label_path)
+        evidence = evidence_by_label.get(label_path, {})
+        if evidence.get("direct_names"):
+            evidence_tier = 1
+            evidence_type = "direct_name"
+        elif evidence.get("contained_places"):
+            evidence_tier = 2
+            evidence_type = "contained_place"
+        elif evidence.get("representative_places"):
+            evidence_tier = 3
+            evidence_type = "representative_place_with_bge"
+        else:
+            evidence_tier = 4
+            evidence_type = "bge_fallback"
+        ranked.append(
+            {
+                "label_path": label_path,
+                "region_evidence_type": evidence_type,
+                "region_evidence_tier": evidence_tier,
+                "matched_direct_names": evidence.get("direct_names") or [],
+                "matched_contained_places": evidence.get("contained_places") or [],
+                "matched_representative_places": evidence.get("representative_places") or [],
+                "region_bm25_rank": bm25["rank"] if bm25 else None,
+                "region_bm25_raw_score": bm25["score"] if bm25 else None,
+                "region_bge_rank": bge["rank"] if bge else None,
+                "region_bge_raw_score": bge["score"] if bge else None,
+            }
+        )
+    ranked.sort(
+        key=lambda item: (
+            item["region_evidence_tier"],
+            item["region_bge_rank"] if item["region_bge_rank"] is not None else 10**9,
+            item["region_bm25_rank"] if item["region_bm25_rank"] is not None else 10**9,
+            item["label_path"],
+        )
+    )
+    return ranked[:limit]
 
 
 def merge_candidate_lists(
@@ -690,28 +734,10 @@ def run_retrieval(
                 region_labels,
                 region_indices,
             )
-            admitted_region_labels = admitted_region_label_paths(
+            regional_fused = rank_region_candidates(
                 regional_sparse,
                 regional_dense,
                 regional_phrase_evidence,
-            )
-            regional_sparse_admitted = [
-                item
-                for item in regional_sparse
-                if item["label_path"] in admitted_region_labels
-            ]
-            regional_dense_admitted = [
-                item
-                for item in regional_dense
-                if item["label_path"] in admitted_region_labels
-            ]
-            regional_fused = rank_fused_candidates(
-                {
-                    "region_bm25": regional_sparse_admitted,
-                    "region_bge": regional_dense_admitted,
-                },
-                exact_matches=regional_exact,
-                agreement_weight=agreement_weight,
                 limit=region_candidate_limit,
             )
             combined = merge_candidate_lists(nonregional_final, regional_fused)
