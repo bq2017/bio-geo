@@ -12,9 +12,11 @@ from bio_geo_tagging.hybrid_candidate_retrieval import (
     admitted_region_label_paths,
     bm25_scores,
     combine_nonregion_candidates,
+    combine_comprehensive_candidates,
     exact_region_candidates,
     fuse_candidates,
     is_region_label_path,
+    is_strict_comprehensive_label_path,
     question_gold_labels,
     question_query_text,
     question_region_exact_text,
@@ -36,6 +38,54 @@ def test_region_label_path_classification():
         "知识点@中国地理@中国地理全貌@中国农业"
     )
     assert not is_region_label_path("知识点@自然地理@地貌@地貌观察")
+
+
+def test_strict_comprehensive_label_classification():
+    assert is_strict_comprehensive_label_path(
+        "知识点@自然地理@地貌@地貌综合"
+    )
+    assert is_strict_comprehensive_label_path(
+        "知识点@世界地理@世界地理综合"
+    )
+    assert not is_strict_comprehensive_label_path(
+        "知识点@区域发展@区域发展@生态脆弱区的综合治理"
+    )
+    assert not is_strict_comprehensive_label_path(
+        "知识点@选修地理（旧）@旅游地理综合题"
+    )
+    assert not is_strict_comprehensive_label_path(
+        "知识点@自然地理@地貌@地貌观察"
+    )
+
+
+def test_comprehensive_candidates_have_an_independent_limit():
+    bm25 = [
+        {"rank": 1, "label_path": "综合甲", "score": 3.0},
+        {"rank": 2, "label_path": "综合乙", "score": 2.0},
+        {"rank": 3, "label_path": "综合丙", "score": 1.0},
+        {"rank": 4, "label_path": "综合丁", "score": 0.5},
+    ]
+    bge = [
+        {"rank": 1, "label_path": "综合丁", "score": 0.9},
+        {"rank": 2, "label_path": "综合甲", "score": 0.8},
+        {"rank": 3, "label_path": "综合乙", "score": 0.7},
+        {"rank": 4, "label_path": "综合丙", "score": 0.6},
+    ]
+
+    selected = combine_comprehensive_candidates(
+        bm25,
+        bge,
+        agreement_weight=0.25,
+        limit=3,
+    )
+
+    assert len(selected) == 3
+    assert {item["label_path"] for item in selected} <= {
+        "综合甲",
+        "综合乙",
+        "综合丙",
+        "综合丁",
+    }
 
 
 def test_exact_region_candidates_uses_leaf_name():

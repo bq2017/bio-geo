@@ -41,6 +41,17 @@ NONREGION_FUSED_QUOTA = 25
 REGION_DIAGNOSTIC_LIMIT = 20
 REGION_REPRESENTATIVE_BGE_MAX_RANK = 10
 REGION_BGE_ONLY_MAX_RANK = 5
+COMPREHENSIVE_DIAGNOSTIC_LIMIT = 20
+
+# These labels contain “综合” in the leaf name, but describe a concrete topic or
+# question type rather than an umbrella label. They stay in the original V3 pool.
+NON_UMBRELLA_COMPREHENSIVE_LABELS = {
+    "知识点@区域发展@区域发展@生态脆弱区的综合治理",
+    "知识点@区域发展@区域发展@北方农牧交错带土地退化的综合治理",
+    "知识点@区域发展@区域协调@流域综合开发",
+    "知识点@选修地理（旧）@旅游地理综合题",
+    "知识点@选修地理（旧）@环境保护综合题",
+}
 
 
 def read_jsonl(path: Path) -> Iterable[tuple[int, dict[str, Any]]]:
@@ -201,6 +212,15 @@ def is_region_label_path(label_path: str) -> bool:
     if parts[1] == "世界地理":
         return parts[2] in WORLD_REGION_BRANCHES
     return False
+
+
+def is_strict_comprehensive_label_path(label_path: str) -> bool:
+    """Return whether a label is an umbrella comprehensive label."""
+    leaf_name = label_path.rsplit("@", 1)[-1]
+    return (
+        "综合" in leaf_name
+        and label_path not in NON_UMBRELLA_COMPREHENSIVE_LABELS
+    )
 
 
 def top_indices_from_pool(
@@ -523,6 +543,20 @@ def combine_nonregion_candidates(
     return combined[:limit], fused_candidates
 
 
+def combine_comprehensive_candidates(
+    bm25_candidates: list[dict[str, Any]],
+    bge_candidates: list[dict[str, Any]],
+    agreement_weight: float,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Rank only strict comprehensive labels and keep a small separate quota."""
+    return rank_fused_candidates(
+        {"bm25": bm25_candidates, "bge": bge_candidates},
+        agreement_weight=agreement_weight,
+        limit=limit,
+    )
+
+
 def merge_candidate_lists(
     primary: list[dict[str, Any]], secondary: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -582,6 +616,7 @@ def run_retrieval(
     batch_size: int,
     device: str | None,
     embedding_model: str | None,
+    comprehensive_candidate_limit: int = 3,
     region_index_dir: Path | None = None,
     agreement_weight: float = 0.25,
     region_bm25_min_score: float = 0.0,
@@ -591,6 +626,7 @@ def run_retrieval(
     if (
         nonregion_candidate_limit <= 0
         or region_candidate_limit <= 0
+        or comprehensive_candidate_limit <= 0
     ):
         raise ValueError("候选数量限制必须大于0")
     if not 0 <= agreement_weight < 1:
@@ -628,8 +664,18 @@ def run_retrieval(
     expected_region_paths = {
         labels[index]["label_path"] for index in global_region_indices
     }
+    strict_comprehensive_indices = [
+        index
+        for index, record in enumerate(labels)
+        if is_strict_comprehensive_label_path(record["label_path"])
+    ]
+    strict_comprehensive_index_set = set(strict_comprehensive_indices)
+    global_region_index_set = set(global_region_indices)
     nonregion_indices = [
-        index for index in range(len(labels)) if index not in global_region_indices
+        index
+        for index in range(len(labels))
+        if index not in global_region_index_set
+        and index not in strict_comprehensive_index_set
     ]
     if region_index_dir is None:
         region_labels = labels
@@ -676,11 +722,17 @@ def run_retrieval(
             raise ValueError("区域题目向量与区域标签向量维度不一致")
     metrics = {
         name: metric_record()
-        for name in ("nonregional_final", "regional_final", "combined")
+        for name in (
+            "nonregional_final",
+            "regional_final",
+            "comprehensive_final",
+            "combined",
+        )
     }
     unknown_gold_labels: dict[str, int] = {}
     fused_counts: list[int] = []
     regional_counts: list[int] = []
+    comprehensive_counts: list[int] = []
     combined_counts: list[int] = []
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8", newline="\n") as output:
@@ -710,6 +762,30 @@ def run_retrieval(
                 dense,
                 agreement_weight,
                 nonregion_candidate_limit,
+            )
+            comprehensive_sparse = ranked_candidates(
+                top_indices_from_pool(
+                    sparse_scores,
+                    strict_comprehensive_indices,
+                    len(strict_comprehensive_indices),
+                ),
+                sparse_scores,
+                labels,
+            )
+            comprehensive_dense = ranked_candidates(
+                top_indices_from_pool(
+                    dense_scores,
+                    strict_comprehensive_indices,
+                    len(strict_comprehensive_indices),
+                ),
+                dense_scores,
+                labels,
+            )
+            comprehensive_final = combine_comprehensive_candidates(
+                comprehensive_sparse,
+                comprehensive_dense,
+                agreement_weight,
+                comprehensive_candidate_limit,
             )
             regional_sparse_scores = (
                 sparse_scores
@@ -766,13 +842,17 @@ def run_retrieval(
                 limit=region_candidate_limit,
             )
             combined = merge_candidate_lists(nonregional_final, regional_fused)
+            combined = merge_candidate_lists(combined, comprehensive_final)
             gold = question_gold_labels(question)
             for label in gold:
                 if label not in allowed_labels:
                     unknown_gold_labels[label] = unknown_gold_labels.get(label, 0) + 1
             known_gold = [label for label in gold if label in allowed_labels]
             nonregional_gold = [
-                label for label in known_gold if not is_region_label_path(label)
+                label
+                for label in known_gold
+                if not is_region_label_path(label)
+                and not is_strict_comprehensive_label_path(label)
             ]
             nonregional_final_labels = {
                 item["label_path"] for item in nonregional_final
@@ -796,8 +876,22 @@ def run_retrieval(
                 regional_gold,
                 regional_fused_labels,
             )
+            comprehensive_gold = [
+                label
+                for label in known_gold
+                if is_strict_comprehensive_label_path(label)
+            ]
+            comprehensive_final_labels = {
+                item["label_path"] for item in comprehensive_final
+            }
+            update_metrics(
+                metrics["comprehensive_final"],
+                comprehensive_gold,
+                comprehensive_final_labels,
+            )
             fused_counts.append(len(nonregional_final))
             regional_counts.append(len(regional_fused))
+            comprehensive_counts.append(len(comprehensive_final))
             combined_counts.append(len(combined))
             result = {
                 "question_id": as_text(question.get("question_id")),
@@ -841,6 +935,18 @@ def run_retrieval(
                     for label in regional_gold
                     if label not in regional_fused_labels
                 ],
+                "comprehensive_bm25_candidates": comprehensive_sparse[
+                    :COMPREHENSIVE_DIAGNOSTIC_LIMIT
+                ],
+                "comprehensive_bge_candidates": comprehensive_dense[
+                    :COMPREHENSIVE_DIAGNOSTIC_LIMIT
+                ],
+                "comprehensive_final_candidates": comprehensive_final,
+                "comprehensive_final_missing_labels": [
+                    label
+                    for label in comprehensive_gold
+                    if label not in comprehensive_final_labels
+                ],
                 "combined_candidates": combined,
                 "combined_missing_labels": [
                     label for label in known_gold if label not in combined_labels
@@ -853,6 +959,7 @@ def run_retrieval(
         "input_questions": len(questions),
         "label_count": len(labels),
         "nonregional_label_count": len(nonregion_indices),
+        "strict_comprehensive_label_count": len(strict_comprehensive_indices),
         "nonregion_bm25_quota": NONREGION_BM25_QUOTA,
         "nonregion_bge_quota": NONREGION_BGE_QUOTA,
         "nonregion_fused_quota": NONREGION_FUSED_QUOTA,
@@ -860,8 +967,11 @@ def run_retrieval(
         "regional_label_count": len(region_indices),
         "regional_index": str(region_index_dir) if region_index_dir else None,
         "region_candidate_limit": region_candidate_limit,
+        "comprehensive_candidate_limit": comprehensive_candidate_limit,
         "maximum_combined_candidates": (
-            nonregion_candidate_limit + region_candidate_limit
+            nonregion_candidate_limit
+            + region_candidate_limit
+            + comprehensive_candidate_limit
         ),
         "agreement_weight": agreement_weight,
         "region_bm25_min_score": region_bm25_min_score,
@@ -881,6 +991,15 @@ def run_retrieval(
             else None,
             "minimum": min(regional_counts) if regional_counts else None,
             "maximum": max(regional_counts) if regional_counts else None,
+        },
+        "comprehensive_candidate_count": {
+            "average": round(
+                sum(comprehensive_counts) / len(comprehensive_counts), 6
+            )
+            if comprehensive_counts
+            else None,
+            "minimum": min(comprehensive_counts) if comprehensive_counts else None,
+            "maximum": max(comprehensive_counts) if comprehensive_counts else None,
         },
         "combined_candidate_count": {
             "average": round(sum(combined_counts) / len(combined_counts), 6)
@@ -909,6 +1028,7 @@ def main() -> None:
     parser.add_argument("--summary-output", type=Path, required=True)
     parser.add_argument("--nonregion-candidate-limit", type=int, default=35)
     parser.add_argument("--region-candidate-limit", type=int, default=5)
+    parser.add_argument("--comprehensive-candidate-limit", type=int, default=3)
     parser.add_argument("--agreement-weight", type=float, default=0.25)
     parser.add_argument("--region-bm25-min-score", type=float, default=0.0)
     parser.add_argument("--region-bge-min-score", type=float, default=0.4)
@@ -927,6 +1047,7 @@ def main() -> None:
         summary_path=args.summary_output,
         nonregion_candidate_limit=args.nonregion_candidate_limit,
         region_candidate_limit=args.region_candidate_limit,
+        comprehensive_candidate_limit=args.comprehensive_candidate_limit,
         batch_size=args.batch_size,
         device=args.device,
         embedding_model=args.embedding_model,
