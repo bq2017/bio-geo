@@ -29,6 +29,7 @@ question-label-diagnose = "bio_geo_tagging.label_definition_diagnosis:main"
 label-retrieval-texts = "bio_geo_tagging.build_retrieval_texts:main"
 label-retrieval-index = "bio_geo_tagging.build_retrieval_index:main"
 question-hybrid-retrieval = "bio_geo_tagging.hybrid_candidate_retrieval:main"
+question-image-urls = "bio_geo_tagging.attach_question_images:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
