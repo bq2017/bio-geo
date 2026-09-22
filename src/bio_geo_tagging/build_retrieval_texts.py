@@ -10,43 +10,6 @@ from typing import Any
 
 
 KEYWORD_SEPARATOR_RE = re.compile(r"[、，,；;\n]+")
-LABEL_FIELD_WEIGHTS = {
-    "label_name": 4,
-    "label_path": 2,
-    "definition": 2,
-    "core_concepts": 2,
-    "common_assessments": 1,
-}
-CHINA_REGION_BRANCHES = {"中国地理分区", "中国地理微区域"}
-WORLD_REGION_BRANCHES = {
-    "世界主要的大洲",
-    "世界重要的地区",
-    "世界重要的国家",
-    "世界地理微区域",
-}
-NON_UMBRELLA_COMPREHENSIVE_LABELS = {
-    "知识点@区域发展@区域发展@生态脆弱区的综合治理",
-    "知识点@区域发展@区域发展@北方农牧交错带土地退化的综合治理",
-    "知识点@区域发展@区域协调@流域综合开发",
-    "知识点@选修地理（旧）@旅游地理综合题",
-    "知识点@选修地理（旧）@环境保护综合题",
-}
-
-
-def uses_weighted_bm25(label_path: str) -> bool:
-    parts = label_path.split("@")
-    is_region = (
-        len(parts) >= 4
-        and (
-            (parts[1] == "中国地理" and parts[2] in CHINA_REGION_BRANCHES)
-            or (parts[1] == "世界地理" and parts[2] in WORLD_REGION_BRANCHES)
-        )
-    )
-    is_strict_comprehensive = (
-        "综合" in parts[-1]
-        and label_path not in NON_UMBRELLA_COMPREHENSIVE_LABELS
-    )
-    return not is_region and not is_strict_comprehensive
 
 
 def normalize_label_path(value: object) -> str:
@@ -115,33 +78,14 @@ def load_source(path: Path) -> list[dict[str, Any]]:
 
 def build_record(source: dict[str, Any]) -> dict[str, Any]:
     label_path = source["label_path"]
-    label_name = label_path.rsplit("@", 1)[-1]
     definition = source["definition"]
     keywords = source["keywords"]
     assessment_scope = source["exam_methods"]
     keyword_text = " ".join(keywords)
 
-    field_weights = LABEL_FIELD_WEIGHTS if uses_weighted_bm25(label_path) else {}
-    if field_weights:
-        weighted_fields = (
-            (label_name, field_weights["label_name"]),
-            (label_path, field_weights["label_path"]),
-            (definition, field_weights["definition"]),
-            (keyword_text, field_weights["core_concepts"]),
-            (assessment_scope, field_weights["common_assessments"]),
-        )
-        bm25_text = " ".join(
-            text
-            for text, weight in weighted_fields
-            if text
-            for _ in range(weight)
-        )
-    else:
-        bm25_text = " ".join(
-            part
-            for part in (label_path, keyword_text, definition, assessment_scope)
-            if part
-        )
+    bm25_text = " ".join(
+        part for part in (label_path, keyword_text, definition, assessment_scope) if part
+    )
     embedding_text = "。".join(
         part.rstrip("。")
         for part in (label_path, definition, assessment_scope)
@@ -152,11 +96,9 @@ def build_record(source: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "label_path": label_path,
-        "label_name": label_name,
         "positive_definition": definition,
         "keywords": keywords,
         "assessment_scope": assessment_scope,
-        "bm25_field_weights": field_weights,
         "bm25_text": bm25_text,
         "embedding_text": embedding_text,
     }

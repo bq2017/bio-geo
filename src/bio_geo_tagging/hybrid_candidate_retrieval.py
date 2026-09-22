@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
-from collections import Counter
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -19,10 +17,6 @@ QUESTION_TEXT_FIELDS = (
     "analysis",
     "explanation",
     "image_description",
-)
-OPTION_RE = re.compile(
-    r"(?:^|\n)\s*([A-H])\s*[.．、:：]\s*(.*?)(?=(?:\n\s*[A-H]\s*[.．、:：])|\Z)",
-    re.DOTALL | re.IGNORECASE,
 )
 
 REGION_EXACT_TEXT_FIELDS = (
@@ -41,7 +35,9 @@ WORLD_REGION_BRANCHES = {
     "世界地理微区域",
 }
 NONREGION_DIAGNOSTIC_LIMIT = 50
-NONREGION_BM25_PRIMARY_QUOTA = 21
+NONREGION_BM25_QUOTA = 12
+NONREGION_BGE_QUOTA = 23
+NONREGION_FUSED_QUOTA = 25
 REGION_DIAGNOSTIC_LIMIT = 20
 REGION_REPRESENTATIVE_BGE_MAX_RANK = 10
 REGION_BGE_ONLY_MAX_RANK = 5
@@ -102,55 +98,6 @@ def question_query_text(question: dict[str, Any]) -> str:
         raise ValueError("sub_questions必须是对象数组")
     for sub_question in sub_questions:
         append_fields(sub_question)
-    return "\n".join(parts)
-
-
-def answer_text(record: dict[str, Any]) -> str:
-    answer = as_text(record.get("answer"))
-    options = as_text(record.get("options"))
-    if not answer or not options:
-        return answer
-    normalized_answer = answer.upper()
-    if not re.fullmatch(r"[A-H\s,，、;；/]+", normalized_answer):
-        return answer
-    option_map = {
-        key.upper(): text.strip()
-        for key, text in OPTION_RE.findall(options)
-        if text.strip()
-    }
-    keys = re.findall(r"[A-H]", normalized_answer)
-    resolved = [option_map[key] for key in keys if key in option_map]
-    return " ".join(resolved) if len(resolved) == len(keys) else answer
-
-
-def question_bm25_query_text(question: dict[str, Any]) -> str:
-    parts: list[str] = []
-
-    def append(text: str, weight: int) -> None:
-        if text:
-            parts.extend([text] * weight)
-
-    def append_target(record: dict[str, Any]) -> None:
-        append(as_text(record.get("stem")), 2)
-        append(answer_text(record), 2)
-        append(
-            as_text(record.get("analysis"))
-            or as_text(record.get("explanation")),
-            2,
-        )
-        append(as_text(record.get("options")), 1)
-
-    sub_questions = question.get("sub_questions") or []
-    if not isinstance(sub_questions, list) or not all(
-        isinstance(item, dict) for item in sub_questions
-    ):
-        raise ValueError("sub_questions必须是对象数组")
-    if sub_questions:
-        append(as_text(question.get("stem")), 1)
-        for sub_question in sub_questions:
-            append_target(sub_question)
-    else:
-        append_target(question)
     return "\n".join(parts)
 
 
@@ -230,15 +177,11 @@ def bm25_scores(query: str, index: dict[str, Any]) -> list[float]:
     scores = [0.0] * int(index["document_count"])
     tokenizer = index.get("tokenizer")
     if tokenizer == "unicode_char_ngram":
-        term_weights = Counter(
-            tokenize_char_ngrams(query, tuple(index["ngram_sizes"]))
-        )
+        terms = set(tokenize_char_ngrams(query, tuple(index["ngram_sizes"])))
     elif tokenizer == "region_phrase":
         normalized_query = normalize_phrase(query)
-        term_weights = {
-            phrase: 1.0
-            for phrase in index["idf"]
-            if phrase in normalized_query
+        terms = {
+            phrase for phrase in index["idf"] if phrase in normalized_query
         }
     else:
         raise ValueError(f"不支持的BM25分词器：{tokenizer}")
@@ -246,7 +189,7 @@ def bm25_scores(query: str, index: dict[str, Any]) -> list[float]:
     b = float(index["b"])
     average_length = float(index["average_document_length"])
     document_lengths = index["document_lengths"]
-    for term, query_weight in term_weights.items():
+    for term in terms:
         term_idf = index["idf"].get(term)
         if term_idf is None:
             continue
@@ -255,11 +198,7 @@ def bm25_scores(query: str, index: dict[str, Any]) -> list[float]:
                 1 - b + b * document_lengths[document_index] / average_length
             )
             scores[document_index] += (
-                float(term_idf)
-                * frequency
-                * (k1 + 1)
-                / denominator
-                * query_weight
+                float(term_idf) * frequency * (k1 + 1) / denominator
             )
     return scores
 
@@ -585,42 +524,23 @@ def rank_region_candidates(
 def combine_nonregion_candidates(
     bm25_candidates: list[dict[str, Any]],
     bge_candidates: list[dict[str, Any]],
+    agreement_weight: float,
     limit: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    bm25_by_label = {item["label_path"]: item for item in bm25_candidates}
-    bge_by_label = {item["label_path"]: item for item in bge_candidates}
-
-    def selected(label: str, source: str) -> dict[str, Any]:
-        item: dict[str, Any] = {
-            "label_path": label,
-            "selection_source": source,
-        }
-        bm25 = bm25_by_label.get(label)
-        if bm25 is not None:
-            item["bm25_rank"] = bm25["rank"]
-            item["bm25_raw_score"] = bm25["score"]
-        bge = bge_by_label.get(label)
-        if bge is not None:
-            item["bge_rank"] = bge["rank"]
-            item["bge_raw_score"] = bge["score"]
-        return item
-
-    primary_limit = min(NONREGION_BM25_PRIMARY_QUOTA, limit)
-    primary = [
-        selected(item["label_path"], "bm25_primary")
-        for item in bm25_candidates[:primary_limit]
-    ]
-    seen = {item["label_path"] for item in primary}
-    supplements: list[dict[str, Any]] = []
-    for item in bge_candidates:
-        if len(primary) + len(supplements) >= limit:
-            break
-        label = item["label_path"]
-        if label in seen:
-            continue
-        supplements.append(selected(label, "bge_supplement"))
-        seen.add(label)
-    return primary + supplements, supplements
+    quota_candidates = rank_fused_candidates(
+        {
+            "bm25": bm25_candidates[:NONREGION_BM25_QUOTA],
+            "bge": bge_candidates[:NONREGION_BGE_QUOTA],
+        },
+        agreement_weight=agreement_weight,
+    )
+    fused_candidates = rank_fused_candidates(
+        {"bm25": bm25_candidates, "bge": bge_candidates},
+        agreement_weight=agreement_weight,
+        limit=NONREGION_FUSED_QUOTA,
+    )
+    combined = merge_candidate_lists(quota_candidates, fused_candidates)
+    return combined[:limit], fused_candidates
 
 
 def combine_comprehensive_candidates(
@@ -718,14 +638,12 @@ def run_retrieval(
     region_embeddings: Any
     questions: list[dict[str, Any]] = []
     query_texts: list[str] = []
-    bm25_query_texts: list[str] = []
     for line_number, question in read_jsonl(input_path):
         query = question_query_text(question)
         if not query:
             raise ValueError(f"题目文件第{line_number}行没有可用于检索的文本")
         questions.append(question)
         query_texts.append(query)
-        bm25_query_texts.append(question_bm25_query_text(question))
 
     model_name = embedding_model or manifest["embedding"]["model"]
     instruction = manifest["embedding"].get("query_instruction", "")
@@ -818,11 +736,8 @@ def run_retrieval(
     combined_counts: list[int] = []
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8", newline="\n") as output:
-        for index, (question, query, bm25_query) in enumerate(
-            zip(questions, query_texts, bm25_query_texts)
-        ):
-            sparse_scores = bm25_scores(bm25_query, bm25)
-            unweighted_sparse_scores = bm25_scores(query, bm25)
+        for index, (question, query) in enumerate(zip(questions, query_texts)):
+            sparse_scores = bm25_scores(query, bm25)
             dense_scores = label_embeddings @ query_embeddings[index]
             sparse = ranked_candidates(
                 top_indices_from_pool(
@@ -842,18 +757,19 @@ def run_retrieval(
                 dense_scores,
                 labels,
             )
-            nonregional_final, nonregional_supplements = combine_nonregion_candidates(
+            nonregional_final, nonregional_fused = combine_nonregion_candidates(
                 sparse,
                 dense,
+                agreement_weight,
                 nonregion_candidate_limit,
             )
             comprehensive_sparse = ranked_candidates(
                 top_indices_from_pool(
-                    unweighted_sparse_scores,
+                    sparse_scores,
                     strict_comprehensive_indices,
                     len(strict_comprehensive_indices),
                 ),
-                unweighted_sparse_scores,
+                sparse_scores,
                 labels,
             )
             comprehensive_dense = ranked_candidates(
@@ -986,7 +902,7 @@ def run_retrieval(
                 ],
                 "bm25_candidates": sparse[:NONREGION_DIAGNOSTIC_LIMIT],
                 "bge_candidates": dense[:NONREGION_DIAGNOSTIC_LIMIT],
-                "nonregional_bge_supplement_candidates": nonregional_supplements,
+                "nonregional_fused_top_candidates": nonregional_fused,
                 "nonregional_final_candidates": nonregional_final,
                 "nonregional_final_missing_labels": [
                     label
@@ -1044,8 +960,9 @@ def run_retrieval(
         "label_count": len(labels),
         "nonregional_label_count": len(nonregion_indices),
         "strict_comprehensive_label_count": len(strict_comprehensive_indices),
-        "nonregion_primary_route": "bm25",
-        "nonregion_bm25_primary_quota": NONREGION_BM25_PRIMARY_QUOTA,
+        "nonregion_bm25_quota": NONREGION_BM25_QUOTA,
+        "nonregion_bge_quota": NONREGION_BGE_QUOTA,
+        "nonregion_fused_quota": NONREGION_FUSED_QUOTA,
         "nonregion_candidate_limit": nonregion_candidate_limit,
         "regional_label_count": len(region_indices),
         "regional_index": str(region_index_dir) if region_index_dir else None,
@@ -1109,7 +1026,7 @@ def main() -> None:
     parser.add_argument("--region-index-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--summary-output", type=Path, required=True)
-    parser.add_argument("--nonregion-candidate-limit", type=int, default=30)
+    parser.add_argument("--nonregion-candidate-limit", type=int, default=35)
     parser.add_argument("--region-candidate-limit", type=int, default=5)
     parser.add_argument("--comprehensive-candidate-limit", type=int, default=3)
     parser.add_argument("--agreement-weight", type=float, default=0.25)

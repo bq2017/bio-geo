@@ -17,7 +17,6 @@ from bio_geo_tagging.hybrid_candidate_retrieval import (
     fuse_candidates,
     is_region_label_path,
     is_strict_comprehensive_label_path,
-    question_bm25_query_text,
     question_gold_labels,
     question_query_text,
     question_region_exact_text,
@@ -137,45 +136,6 @@ def test_question_text_and_gold_cover_root_and_subquestions():
     assert "小题题干" in text
     assert "标签甲" not in text
     assert question_gold_labels(question) == ["标签甲", "标签乙"]
-
-
-def test_question_bm25_query_applies_field_weights_and_resolves_answer_text():
-    question = {
-        "stem": "公共材料",
-        "sub_questions": [
-            {
-                "stem": "当前小题",
-                "options": "A.错误内容\nB.正确内容",
-                "answer": "B",
-                "analysis": "答案解析",
-            }
-        ],
-    }
-
-    parts = question_bm25_query_text(question).splitlines()
-
-    assert parts.count("公共材料") == 1
-    assert parts.count("当前小题") == 2
-    assert parts.count("正确内容") == 2
-    assert parts.count("答案解析") == 2
-    assert parts.count("A.错误内容") == 1
-    assert parts.count("B.正确内容") == 1
-
-
-def test_bm25_query_repetition_increases_term_contribution():
-    records = [
-        {
-            "label_path": "标签甲",
-            "bm25_text": "海水温度",
-            "embedding_text": "海水温度",
-        }
-    ]
-    index = build_bm25_index(records, (2,), 1.5, 0.75)
-
-    once = bm25_scores("海水", index)[0]
-    twice = bm25_scores("海水 海水", index)[0]
-
-    assert twice == pytest.approx(once * 2)
 
 
 def test_region_exact_text_includes_analysis_but_excludes_options():
@@ -343,36 +303,28 @@ def test_fusion_keeps_strong_single_route_above_two_weak_routes():
     assert result[1]["support_count"] == 2
 
 
-def test_nonregion_combination_keeps_bm25_primary_and_adds_new_bge_labels():
+def test_nonregion_combination_keeps_quota_and_fused_candidates():
     bm25 = [
+        {"rank": rank, "label_path": f"label-{rank}", "score": 1.0 / rank}
+        for rank in range(1, 21)
+    ]
+    bge = [
         {"rank": rank, "label_path": f"label-{rank}", "score": 1.0 / rank}
         for rank in range(1, 31)
     ]
-    bge = [
-        {
-            "rank": rank,
-            "label_path": f"label-{rank + 15}",
-            "score": 1.0 / rank,
-        }
-        for rank in range(1, 31)
-    ]
-    final, supplements = combine_nonregion_candidates(
+    final, fused = combine_nonregion_candidates(
         bm25,
         bge,
-        limit=30,
+        agreement_weight=0.25,
+        limit=35,
     )
 
-    assert len(final) == 30
-    assert [item["label_path"] for item in final[:21]] == [
-        f"label-{rank}" for rank in range(1, 22)
-    ]
-    assert [item["label_path"] for item in supplements] == [
-        f"label-{rank}" for rank in range(22, 31)
-    ]
-    assert all(
-        item["selection_source"] == "bge_supplement"
-        for item in supplements
-    )
+    labels = {item["label_path"] for item in final}
+    assert len(final) == 25
+    assert len(fused) == 25
+    assert "label-23" in labels
+    assert "label-25" in labels
+    assert "label-26" not in labels
 
 
 def make_index(index_dir: Path) -> None:
