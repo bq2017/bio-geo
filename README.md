@@ -157,6 +157,50 @@ PYTHONPATH=src python -m bio_geo_tagging.call1_candidate_retrieval \
 如果不限定抽样数量，希望输出全部符合条件的题目，使用 `--all-eligible`，并且不要
 同时传入 `--big-questions`。
 
+## 第二阶段：候选标签精排
+
+第二阶段从第一阶段候选中选择当前题目或当前小题直接考查的知识点。精排程序兼容：
+
+- 混合召回输出中的 `combined_candidates`；
+- DS 调用一输出中的 `candidate_labels`；
+- 已规范化的 `candidates`。
+
+完整标签释义文件至少要提供 `label_path` 和 `definition`。也可以直接使用现有地理字段
+`positive_definition`/`assessment_scope`，或
+`knowledge_scope`/`common_exam_content`/`distinction_from_similar_labels`。
+建议正式运行前为全部标签补齐相邻标签边界。
+
+整题召回结果可以直接用于小题精排：程序优先按小题查找候选，找不到时按
+`root_question_id` 复用整题候选。DS请求不会提交图片或图片URL；如果上游已有可靠的
+文字图片描述，重新生成打标单元后会通过 `context_image_description` 传给小题。
+题目明确依赖图片但没有文字描述时，Prompt会要求模型标记
+`context_insufficient=true`，不得根据答案或解析猜测图片内容。
+
+示例：
+
+```bash
+PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication \
+  --units data/annotation/geography-tagging-units.jsonl \
+  --candidates runs/retrieval/geography-hybrid-candidates.jsonl \
+  --labels data/taxonomy/geography-adjudication-labels.jsonl \
+  --audited-exclusions configs/geography_adjudication_audited_exclusions.json \
+  --run-dir runs/adjudication/geography-smoke-50 \
+  --endpoint http://172.22.0.35:9204/v1/chat/completions \
+  --model Qwen3.8-27B \
+  --disable-thinking \
+  --limit 50 \
+  --workers 10 \
+  --timeout 600 \
+  --retries 3 \
+  --retry-delay 1 \
+  --request-interval 0 \
+  --max-tokens 512
+```
+
+输出目录包含 `evidence.jsonl`、`predictions.jsonl`、`report.json`、
+`tail_selected.jsonl` 和 `run_manifest.json`。输入文件、模型、Prompt或限制发生变化时，
+必须使用新的运行目录。
+
 ## 原标签与原释义匹配评分
 
 先从释义对比结果中提取**现有释义**（不使用 DS 生成释义）：

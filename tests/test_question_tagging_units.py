@@ -1,6 +1,24 @@
 import json
 
-from bio_geo_tagging.question_tagging_units import process_file
+from bio_geo_tagging.question_tagging_units import expand_question, process_file
+
+
+def test_expand_question_propagates_only_parent_image_description():
+    units = list(
+        expand_question(
+            {
+                "question_id": "parent-1",
+                "stem": "公共题干",
+                "image_description": "等高线图，甲地海拔高于乙地",
+                "stem_image_url": "https://example.test/parent.png",
+                "sub_questions": [
+                    {"question_id": "child-1", "stem": "判断两地气温差异"}
+                ],
+            }
+        )
+    )
+    assert units[1]["context_image_description"] == "等高线图，甲地海拔高于乙地"
+    assert "context_stem_image_url" not in units[1]
 
 
 def test_process_file_expands_root_and_sub_questions(tmp_path):

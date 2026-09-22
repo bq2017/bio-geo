@@ -53,6 +53,9 @@ def expand_question(question: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
         sub_unit["input_role"] = "subquestion"
         sub_unit["root_question_id"] = root_question_id
         sub_unit["context_stem"] = root_stem
+        image_description = question.get("image_description")
+        if image_description:
+            sub_unit["context_image_description"] = image_description
         yield sub_unit
 
 
