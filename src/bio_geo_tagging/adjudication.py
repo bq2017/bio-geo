@@ -81,6 +81,36 @@ def make_unit_key(unit: dict[str, Any]) -> str:
     return f"{root_question_id}|{question_id}|{input_role}"
 
 
+def limit_units_by_root(
+    units: list[dict[str, Any]], limit: int | None
+) -> list[dict[str, Any]]:
+    """Limit complete root-question groups without splitting a big question."""
+    if limit is None:
+        return units
+    selected_roots: list[str] = []
+    selected_set: set[str] = set()
+    for unit in units:
+        question_id = _as_text(unit.get("question_id"))
+        root_question_id = _as_text(
+            unit.get("root_question_id") or unit.get("parent_id") or question_id
+        )
+        if root_question_id not in selected_set:
+            if len(selected_roots) >= limit:
+                continue
+            selected_roots.append(root_question_id)
+            selected_set.add(root_question_id)
+    return [
+        unit
+        for unit in units
+        if _as_text(
+            unit.get("root_question_id")
+            or unit.get("parent_id")
+            or unit.get("question_id")
+        )
+        in selected_set
+    ]
+
+
 def load_labels(path: str | Path) -> dict[str, dict[str, str]]:
     """Load geography labels and key them by the candidate-facing label path."""
     labels: dict[str, dict[str, str]] = {}
@@ -708,8 +738,7 @@ def run_adjudication(
     if workers < 1:
         raise ValueError("workers must be positive")
     units = _read_jsonl(units_path)
-    if limit is not None:
-        units = units[:limit]
+    units = limit_units_by_root(units, limit)
     unit_keys = [make_unit_key(unit) for unit in units]
     if len(unit_keys) != len(set(unit_keys)):
         raise ValueError("units contain duplicate unit keys")

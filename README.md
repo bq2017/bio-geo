@@ -208,6 +208,7 @@ PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication \
 `question_predictions.jsonl`、`tail_selected.jsonl` 和 `run_manifest.json`。
 `predictions.jsonl`是逐小题/逐综合专项结果，`question_predictions.jsonl`是整道题最终并集。
 输入文件、模型、Prompt或限制发生变化时，必须使用新的运行目录。
+`--limit`按整道题计数；大题的综合专项和全部小题不会被拆开截断。
 
 ## 原标签与原释义匹配评分
 

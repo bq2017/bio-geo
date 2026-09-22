@@ -8,6 +8,7 @@ from bio_geo_tagging.adjudication import (
     build_adjudication_inputs,
     build_adjudication_prompt,
     candidates_for_unit,
+    limit_units_by_root,
     load_labels,
     normalize_candidates,
     run_adjudication,
@@ -92,6 +93,28 @@ def test_candidate_index_reuses_root_candidates_for_subquestion():
         }
     )
     assert candidates[0]["label_id"] == "知识点@甲"
+
+
+def test_limit_counts_root_questions_without_splitting_big_question():
+    units = [
+        {
+            "question_id": "root-1",
+            "root_question_id": "root-1",
+            "input_role": "whole_question_comprehensive",
+        },
+        {
+            "question_id": "child-1",
+            "root_question_id": "root-1",
+            "input_role": "subquestion",
+        },
+        {
+            "question_id": "root-2",
+            "root_question_id": "root-2",
+            "input_role": "root",
+        },
+    ]
+    selected = limit_units_by_root(units, 1)
+    assert [unit["question_id"] for unit in selected] == ["root-1", "child-1"]
 
 
 def test_load_labels_accepts_existing_geography_definition_fields(tmp_path):

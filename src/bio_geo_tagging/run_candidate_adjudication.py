@@ -21,7 +21,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--endpoint", action="append", dest="endpoints")
     parser.add_argument("--model", default=os.getenv("MODEL", "DeepSeek-V4-Flash"))
-    parser.add_argument("--limit", type=int)
+    parser.add_argument("--limit", type=int, help="limit complete root questions")
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--retry-delay", type=float, default=1.0)
