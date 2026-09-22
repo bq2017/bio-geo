@@ -17,10 +17,11 @@ def test_expand_question_propagates_only_parent_image_description():
             }
         )
     )
-    assert units[0]["input_role"] == "whole_question_comprehensive"
+    assert units[0]["input_role"] == "whole_question_region"
     assert units[0]["sub_questions"][0]["question_id"] == "child-1"
-    assert units[1]["context_image_description"] == "等高线图，甲地海拔高于乙地"
-    assert "context_stem_image_url" not in units[1]
+    assert units[1]["input_role"] == "whole_question_comprehensive"
+    assert units[2]["context_image_description"] == "等高线图，甲地海拔高于乙地"
+    assert "context_stem_image_url" not in units[2]
 
 
 def test_process_file_expands_root_and_sub_questions(tmp_path):
@@ -58,6 +59,25 @@ def test_process_file_expands_root_and_sub_questions(tmp_path):
         for line in output_file.read_text(encoding="utf-8").splitlines()
     ]
     assert units == [
+        {
+            "parent_id": "parent-1",
+            "question_id": "parent-1",
+            "stem": "公共题干",
+            "options": "",
+            "analysis": "",
+            "root_question_id": "parent-1",
+            "context_stem": "",
+            "sub_questions": [
+                {
+                    "parent_id": "parent-1",
+                    "question_id": "child-1",
+                    "stem": "小题一",
+                    "options": "A. 选项",
+                    "analysis": "小题解析",
+                }
+            ],
+            "input_role": "whole_question_region",
+        },
         {
             "parent_id": "parent-1",
             "question_id": "parent-1",

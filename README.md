@@ -179,9 +179,11 @@ PYTHONPATH=src python -m bio_geo_tagging.call1_candidate_retrieval \
 题目明确依赖图片但没有文字描述时，Prompt会要求模型标记
 `context_insufficient=true`，不得根据答案或解析猜测图片内容。
 
-普通题执行一次全部候选精排。大题的每个小题分别判断非综合标签，公共题干只作上下文；
-同时以公共题干和全部小题执行一次综合Label专项判断。最终
-`question_predictions.jsonl`将各小题标签与整题综合标签合并为整道题结果。
+普通题执行一次全部候选精排。大题的每个小题分别判断普通的非区域、非综合标签，
+公共题干只作上下文；同时以公共题干和全部小题分别执行一次区域Label专项判断和一次
+综合Label专项判断。区域专项只有在至少一个小题必须使用该区域特有知识时才选择，
+地名仅作为材料发生地时不选。最终 `question_predictions.jsonl` 将各小题标签、
+整题区域标签与整题综合标签合并为整道题结果。
 
 示例：
 
