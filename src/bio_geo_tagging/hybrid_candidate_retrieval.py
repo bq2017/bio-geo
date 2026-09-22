@@ -175,21 +175,7 @@ def bm25_scores(query: str, index: dict[str, Any]) -> list[float]:
     scores = [0.0] * int(index["document_count"])
     tokenizer = index.get("tokenizer")
     if tokenizer == "unicode_char_ngram":
-        terms = set(
-            tokenize_char_ngrams(
-                query,
-                tuple(index["ngram_sizes"]),
-                short_segment_max_length=0,
-            )
-        )
-    elif tokenizer == "unicode_char_ngram_with_short_segments":
-        terms = set(
-            tokenize_char_ngrams(
-                query,
-                tuple(index["ngram_sizes"]),
-                short_segment_max_length=int(index["short_segment_max_length"]),
-            )
-        )
+        terms = set(tokenize_char_ngrams(query, tuple(index["ngram_sizes"])))
     elif tokenizer == "region_phrase":
         normalized_query = normalize_phrase(query)
         terms = {

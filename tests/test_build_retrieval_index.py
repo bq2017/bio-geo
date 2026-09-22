@@ -42,27 +42,20 @@ def test_parse_ngram_sizes_sorts_and_deduplicates():
         parse_ngram_sizes("0,2")
 
 
-def test_tokenize_char_ngrams_keeps_bigrams_trigrams_short_segment_and_latin():
-    tokens = tokenize_char_ngrams("海水温度 111 km", (2, 3))
+def test_tokenize_char_ngrams_keeps_chinese_unigrams_bigrams_and_latin():
+    tokens = tokenize_char_ngrams("海水温度 111 km", (1, 2))
 
     assert tokens == [
+        "海",
+        "水",
+        "温",
+        "度",
         "海水",
         "水温",
         "温度",
-        "海水温",
-        "水温度",
-        "海水温度",
         "111",
         "km",
     ]
-
-
-def test_tokenize_char_ngrams_does_not_keep_long_chinese_segment():
-    segment = "一二三四五六七八九十甲乙丙"
-
-    tokens = tokenize_char_ngrams(segment, (2, 3))
-
-    assert segment not in tokens
 
 
 def test_build_bm25_index_creates_postings_and_positive_idf():
@@ -82,7 +75,7 @@ def test_build_bm25_index_creates_postings_and_positive_idf():
     index = build_bm25_index(records, (2,), 1.5, 0.75)
 
     assert index["document_count"] == 2
-    assert index["document_lengths"] == [4, 4]
+    assert index["document_lengths"] == [3, 3]
     assert index["postings"]["温度"] == [[0, 1]]
     assert index["postings"]["盐度"] == [[1, 1]]
     assert index["idf"]["海水"] > 0
