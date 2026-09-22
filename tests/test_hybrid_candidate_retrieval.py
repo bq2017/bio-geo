@@ -17,8 +17,10 @@ from bio_geo_tagging.hybrid_candidate_retrieval import (
     fuse_candidates,
     is_region_label_path,
     is_strict_comprehensive_label_path,
+    longest_place_name_matches,
     question_gold_labels,
     question_query_text,
+    question_region_evidence_texts,
     question_region_exact_text,
     region_phrase_evidence,
     rank_fused_candidates,
@@ -159,6 +161,16 @@ def test_region_phrase_evidence_separates_primary_and_analysis_places():
     assert by_label[labels[2]["label_path"]]["weak_direct_names"] == ["加拿大"]
 
 
+def test_place_name_matching_preserves_real_geographic_containment():
+    phrases = {"北美", "北美洲", "东非", "东非大裂谷"}
+
+    assert longest_place_name_matches("北美洲", phrases) == {"北美", "北美洲"}
+    assert longest_place_name_matches("东非大裂谷", phrases) == {
+        "东非",
+        "东非大裂谷",
+    }
+
+
 @pytest.mark.parametrize(
     ("query", "long_place"),
     [
@@ -230,6 +242,18 @@ def test_region_exact_text_includes_analysis_but_excludes_options():
     assert "北欧" in text
     assert "非洲和北美洲均不符合题意" in text
     assert "A.非洲 B.北美洲" not in text
+
+
+def test_analysis_place_is_primary_region_evidence():
+    question = {
+        "stem": "读图回答",
+        "analysis": "图示区域为英国",
+        "sub_questions": [],
+    }
+    primary, weak = question_region_evidence_texts(question)
+
+    assert "英国" in primary
+    assert weak == ""
 
 
 def test_region_admission_uses_single_place_only_with_strong_bge_support():

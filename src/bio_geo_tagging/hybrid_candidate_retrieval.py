@@ -23,8 +23,10 @@ REGION_EXACT_TEXT_FIELDS = (
     "stem",
     "answer",
     "image_description",
+    "analysis",
+    "explanation",
 )
-REGION_WEAK_TEXT_FIELDS = ("analysis", "explanation")
+REGION_WEAK_TEXT_FIELDS: tuple[str, ...] = ()
 
 CHINA_REGION_BRANCHES = {"中国地理分区", "中国地理微区域"}
 WORLD_REGION_BRANCHES = {
@@ -42,7 +44,9 @@ REGION_DIAGNOSTIC_LIMIT = 20
 REGION_REPRESENTATIVE_BGE_MAX_RANK = 10
 REGION_BGE_ONLY_MAX_RANK = 5
 COMPREHENSIVE_DIAGNOSTIC_LIMIT = 20
-PLACE_NAME_CONTINUATION_SUFFIXES = ("洋",)
+PLACE_NAME_FALSE_SUBSTRING_BLOCKERS = {
+    "印度": ("印度尼西亚", "西印度群岛", "印度洋"),
+}
 
 # These labels contain “综合” in the leaf name, but describe a concrete topic or
 # question type rather than an umbrella label. They stay in the original V3 pool.
@@ -109,7 +113,7 @@ def question_region_exact_text(question: dict[str, Any]) -> str:
 
 
 def question_region_evidence_texts(question: dict[str, Any]) -> tuple[str, str]:
-    """Separate primary place evidence from place names mentioned in analysis."""
+    """Return usable regional evidence and reserved weak evidence text."""
     parts: list[str] = []
     weak_parts: list[str] = []
 
@@ -280,25 +284,28 @@ def exact_region_candidates(
 
 
 def longest_place_name_matches(query: str, phrases: Iterable[str]) -> set[str]:
-    """Match complete place names and suppress shorter names inside longer ones."""
-    accepted_spans: list[tuple[int, int]] = []
+    """Match place names while blocking known lexical false substrings."""
     matched: set[str] = set()
-    for phrase in sorted(set(phrases), key=lambda value: (-len(value), value)):
+    for phrase in set(phrases):
         start = query.find(phrase)
         while start >= 0:
             end = start + len(phrase)
-            continues_as_longer_place_name = any(
-                query.startswith(suffix, end)
-                for suffix in PLACE_NAME_CONTINUATION_SUFFIXES
+            blocked = any(
+                blocker_start <= start and end <= blocker_start + len(blocker)
+                for blocker in PLACE_NAME_FALSE_SUBSTRING_BLOCKERS.get(phrase, ())
+                for blocker_start in _phrase_starts(query, blocker)
             )
-            if not continues_as_longer_place_name and not any(
-                accepted_start <= start and end <= accepted_end
-                for accepted_start, accepted_end in accepted_spans
-            ):
-                accepted_spans.append((start, end))
+            if not blocked:
                 matched.add(phrase)
             start = query.find(phrase, start + 1)
     return matched
+
+
+def _phrase_starts(query: str, phrase: str) -> Iterable[int]:
+    start = query.find(phrase)
+    while start >= 0:
+        yield start
+        start = query.find(phrase, start + 1)
 
 
 def region_phrase_evidence(
