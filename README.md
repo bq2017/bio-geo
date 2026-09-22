@@ -248,6 +248,29 @@ question-label-match score \
 `scored`，材料不足为 `unjudgeable`。代码会强制检查 `unjudgeable` 必须对应
 `score=null`，避免将缺图题误记为0分。
 
+### 仅根据标签名称复评已有题目—标签对
+
+以旧评分结果作为唯一任务清单，取回相同完整大题，仅向模型提供知识点完整路径
+名称，不提供现有释义。输出顺序与旧评分任务顺序一致，便于后续按照
+`(question_id, label_id)` 对比两种评分：
+
+```bash
+PYTHONPATH=src python -m bio_geo_tagging.question_label_match score-by-name \
+  --pairs-jsonl runs/validation/geography-label-match-40pct.jsonl \
+  --questions-jsonl data/processed/geography-merged-with-labels.jsonl \
+  --output-jsonl runs/validation/geography-label-name-match-40pct.jsonl \
+  --log-file runs/logs/geography-label-name-match-40pct.log \
+  --base-url http://172.22.0.35:9204/v1 \
+  --model DeepSeek-V4-Flash \
+  --workers 25 \
+  --timeout 180 \
+  --limit 10
+```
+
+小批量验证后去掉 `--limit 10` 运行全部旧任务。命令不会读取释义文件，也不会根据
+题目当前的 `knw_labels` 增加任务；每次运行都会覆盖新结果文件和日志，不影响旧的
+释义评分结果。
+
 ### 阶段性异常知识点分析
 
 先复制正在写入的评分结果作为阶段性快照，再按历史报告口径生成ABCD统计、异常

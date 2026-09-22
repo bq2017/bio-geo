@@ -26,6 +26,19 @@ SYSTEM_PROMPT = """你是高中地理题目与原有知识点释义的匹配度�
 可评分：{"judgement":"scored","score":0到1的数字,"reason":"一句简短中文理由"}
 无法判断：{"judgement":"unjudgeable","score":null,"reason":"一句简短中文理由"}。"""
 
+NAME_ONLY_SYSTEM_PROMPT = """你是高中地理题目与知识点名称的匹配度评估员。
+当前输入是一道完整大题，包含公共题干和全部小题。只评估整道大题是否实际考查给定的原标签，不重新打标，也不判断其他知识点。
+只依据知识点完整路径名称的通常教学含义判断解题所需知识；本任务不提供知识点释义，不要假设存在未提供的项目释义。
+只要公共题干或至少一个小题明确考查该知识点，整道大题就可以匹配，不要求每个小题都考查它；不要把仅作为材料背景出现的词语当作考点。
+不要仅因题目和标签没有相同字词而扣分。解析可以辅助判断，但不能只凭解析中的提及判定考点。
+0.90-1.00：直接核心依据；0.80-0.89：明确考查；0.70-0.79：可归入但偏边界/辅助；
+0.40-0.69：有关联但不足以作为该题知识点；0.10-0.39：背景或弱关联；
+0.01-0.09：基本无关；0.00：完全无关。
+如果现有题干、选项和解析足以判断，即使图片缺失也正常评分。只有缺失的图片或图表是判断匹配度不可替代的信息时，才判为unjudgeable；不要把材料缺失当作低匹配。
+只输出JSON对象，且必须遵守以下二选一格式：
+可评分：{"judgement":"scored","score":0到1的数字,"reason":"一句简短中文理由"}
+无法判断：{"judgement":"unjudgeable","score":null,"reason":"一句简短中文理由"}。"""
+
 
 def configure_run_logger(log_file: str | None) -> logging.Logger:
     """Create an overwritten log for progress, results, and request errors."""
@@ -124,21 +137,11 @@ def read_complete_questions(path: str):
         yield unit
 
 
-def request_score(client: OpenAI, model: str, unit: dict, definition: dict) -> dict:
-    payload = {
-        "knowledge_path": definition["knw_label"],
-        "existing_interpretation": definition["existing_interpretation"],
-        "complete_question": {
-            "stem": unit.get("stem", ""),
-            "options": unit.get("options", ""),
-            "analysis": unit.get("analysis", ""),
-            "sub_questions": unit.get("scoring_sub_questions", []),
-        },
-    }
+def request_assessment(client: OpenAI, model: str, system_prompt: str, payload: dict) -> dict:
     chunks = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ],
         temperature=0,
@@ -170,6 +173,32 @@ def request_score(client: OpenAI, model: str, unit: dict, definition: dict) -> d
         "match": match,
         "reason": reason.strip(),
     }
+
+
+def complete_question_payload(unit: dict) -> dict:
+    return {
+        "stem": unit.get("stem", ""),
+        "options": unit.get("options", ""),
+        "analysis": unit.get("analysis", ""),
+        "sub_questions": unit.get("scoring_sub_questions", []),
+    }
+
+
+def request_score(client: OpenAI, model: str, unit: dict, definition: dict) -> dict:
+    payload = {
+        "knowledge_path": definition["knw_label"],
+        "existing_interpretation": definition["existing_interpretation"],
+        "complete_question": complete_question_payload(unit),
+    }
+    return request_assessment(client, model, SYSTEM_PROMPT, payload)
+
+
+def request_name_score(client: OpenAI, model: str, unit: dict, label: str) -> dict:
+    payload = {
+        "knowledge_path": label,
+        "complete_question": complete_question_payload(unit),
+    }
+    return request_assessment(client, model, NAME_ONLY_SYSTEM_PROMPT, payload)
 
 
 def score_units(
@@ -276,6 +305,127 @@ def score_units(
     return summary
 
 
+def score_existing_pairs_by_name(
+    pairs_file: str,
+    questions_file: str,
+    output: str,
+    base_url: str,
+    model: str,
+    workers: int = 1,
+    limit: int | None = None,
+    timeout: float = 180.0,
+    log_file: str | None = None,
+) -> dict[str, int]:
+    """Rescore exactly the prior question-label pairs using only label paths."""
+    if workers < 1 or limit is not None and limit < 1:
+        raise ValueError("workers和limit必须为正整数")
+
+    questions = {}
+    for unit in read_complete_questions(questions_file):
+        question_id = str(unit["question_id"])
+        if question_id in questions:
+            raise ValueError(f"聚合题目文件中重复的question_id: {question_id}")
+        questions[question_id] = unit
+
+    def pending_tasks():
+        for number, record in read_jsonl(pairs_file):
+            question_id_value = record.get("question_id")
+            label_id_value = record.get("label_id")
+            question_id = "" if question_id_value is None else str(question_id_value)
+            label_id = "" if label_id_value is None else str(label_id_value)
+            label = record.get("knw_label")
+            if not question_id or not label_id or not isinstance(label, str) or not label:
+                raise ValueError(f"原评分文件第 {number} 行缺少题目或标签标识")
+            yield question_id, label_id, label
+
+    total_pairs = sum(1 for _ in read_jsonl(pairs_file))
+    if limit is not None:
+        total_pairs = min(total_pairs, limit)
+
+    client = OpenAI(api_key="not-required", base_url=base_url, timeout=timeout, max_retries=0)
+    run_logger = configure_run_logger(log_file)
+    summary = {"attempted": 0, "completed": 0, "errors": 0}
+    started_at = time.monotonic()
+    run_logger.info(
+        "name_run_started pairs=%s questions=%s output=%s total_pairs=%s "
+        "workers=%s timeout=%s model=%s base_url=%s",
+        pairs_file,
+        questions_file,
+        output,
+        total_pairs,
+        workers,
+        timeout,
+        model,
+        base_url,
+    )
+
+    def evaluate(task):
+        question_id, label_id, label = task
+        result = {
+            "question_id": question_id,
+            "knw_label": label,
+            "label_id": label_id,
+            "model": model,
+            "scoring_basis": "label_name",
+        }
+        try:
+            unit = questions.get(question_id)
+            if unit is None:
+                raise ValueError("聚合题目文件中不存在该question_id")
+            result.update(request_name_score(client, model, unit, label))
+            result["status"] = "completed"
+        except Exception as error:
+            result.update(status="error", error_type=type(error).__name__, error=str(error))
+            run_logger.error(
+                "question_id=%s label_id=%s knw_label=%s error_type=%s error=%s",
+                question_id,
+                label_id,
+                label,
+                type(error).__name__,
+                error,
+                exc_info=True,
+            )
+        return result
+
+    target = Path(output)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8") as stream, ThreadPoolExecutor(max_workers=workers) as pool:
+        from itertools import islice
+
+        tasks = pending_tasks()
+        if limit is not None:
+            tasks = islice(tasks, limit)
+        with tqdm(total=total_pairs, desc="Scoring existing pairs by label name") as progress:
+            while batch := list(islice(tasks, workers * 2)):
+                for result in pool.map(evaluate, batch):
+                    stream.write(json.dumps(result, ensure_ascii=False) + "\n")
+                    stream.flush()
+                    summary["attempted"] += 1
+                    summary["completed" if result["status"] == "completed" else "errors"] += 1
+                    run_logger.info(
+                        "progress=%s/%s status=%s question_id=%s label_id=%s "
+                        "score=%s match=%s elapsed=%.1fs",
+                        summary["attempted"],
+                        total_pairs,
+                        result["status"],
+                        result["question_id"],
+                        result["label_id"],
+                        result.get("score"),
+                        result.get("match"),
+                        time.monotonic() - started_at,
+                    )
+                    progress.update(1)
+
+    run_logger.info(
+        "name_run_finished attempted=%s completed=%s errors=%s elapsed=%.1fs",
+        summary["attempted"],
+        summary["completed"],
+        summary["errors"],
+        time.monotonic() - started_at,
+    )
+    return summary
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Export original definitions or score question-label pairs")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -296,11 +446,31 @@ def main() -> None:
         required=True,
         help="Overwrite this file with run progress and request errors",
     )
+    name_scoring = commands.add_parser("score-by-name")
+    name_scoring.add_argument(
+        "--pairs-jsonl",
+        required=True,
+        help="Previous scoring JSONL used as the exact question-label task list",
+    )
+    name_scoring.add_argument("--questions-jsonl", required=True)
+    name_scoring.add_argument("--output-jsonl", required=True)
+    name_scoring.add_argument("--base-url", required=True)
+    name_scoring.add_argument("--model", default="DeepSeek-V4-Flash")
+    name_scoring.add_argument("--workers", type=int, default=1)
+    name_scoring.add_argument("--limit", type=int)
+    name_scoring.add_argument("--timeout", type=float, default=180.0)
+    name_scoring.add_argument(
+        "--log-file",
+        required=True,
+        help="Overwrite this file with run progress and request errors",
+    )
     arguments = parser.parse_args()
     if arguments.command == "export-definitions":
         print(json.dumps({"definitions": export_definitions(arguments.comparison_jsonl, arguments.output_jsonl)}, ensure_ascii=False))
-    else:
+    elif arguments.command == "score":
         print(json.dumps(score_units(arguments.input_jsonl, arguments.definitions_jsonl, arguments.output_jsonl, arguments.base_url, arguments.model, arguments.workers, arguments.limit, arguments.timeout, arguments.log_file), ensure_ascii=False))
+    else:
+        print(json.dumps(score_existing_pairs_by_name(arguments.pairs_jsonl, arguments.questions_jsonl, arguments.output_jsonl, arguments.base_url, arguments.model, arguments.workers, arguments.limit, arguments.timeout, arguments.log_file), ensure_ascii=False))
 
 
 if __name__ == "__main__":

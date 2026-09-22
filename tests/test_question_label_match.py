@@ -180,3 +180,111 @@ def test_request_score_rejects_unjudgeable_with_numeric_score():
         matching.request_score(
             InvalidClient(), "DeepSeek-V4-Flash", unit, definition
         )
+
+
+def test_score_existing_pairs_by_name_uses_only_prior_pairs(tmp_path, monkeypatch):
+    questions = tmp_path / "questions.jsonl"
+    prior_scores = tmp_path / "prior-scores.jsonl"
+    output = tmp_path / "name-scores.jsonl"
+    log_file = tmp_path / "name-scores.log"
+    write_jsonl(questions, [
+        dict(
+            question_id="q1",
+            stem="公共题干一",
+            knw_labels=["知识点@当前数据中的其他标签"],
+            sub_questions=[],
+        ),
+        dict(
+            question_id="q2",
+            stem="不应进入本次评分",
+            knw_labels=["知识点@未在旧结果中出现"],
+            sub_questions=[],
+        ),
+    ])
+    write_jsonl(prior_scores, [
+        dict(question_id="q1", label_id="1", knw_label="知识点@标签甲"),
+        dict(question_id="q1", label_id="2", knw_label="知识点@标签乙"),
+    ])
+
+    payloads = []
+    system_prompts = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+
+        def create(self, **kwargs):
+            system_prompts.append(kwargs["messages"][0]["content"])
+            payloads.append(json.loads(kwargs["messages"][1]["content"]))
+            answer = {
+                "judgement": "scored",
+                "score": 0.75,
+                "reason": "名称范围内的边界考查",
+            }
+            return [
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(
+                                content=json.dumps(answer, ensure_ascii=False)
+                            )
+                        )
+                    ]
+                )
+            ]
+
+    monkeypatch.setattr(matching, "OpenAI", FakeClient)
+    output.write_text("stale output\n", encoding="utf-8")
+    summary = matching.score_existing_pairs_by_name(
+        str(prior_scores),
+        str(questions),
+        str(output),
+        "http://example/v1",
+        "DeepSeek-V4-Flash",
+        workers=2,
+        log_file=str(log_file),
+    )
+
+    assert summary == {"attempted": 2, "completed": 2, "errors": 0}
+    rows = [row for _, row in matching.read_jsonl(str(output))]
+    assert [(row["question_id"], row["label_id"], row["knw_label"]) for row in rows] == [
+        ("q1", "1", "知识点@标签甲"),
+        ("q1", "2", "知识点@标签乙"),
+    ]
+    assert all(row["scoring_basis"] == "label_name" for row in rows)
+    assert {payload["knowledge_path"] for payload in payloads} == {
+        "知识点@标签甲",
+        "知识点@标签乙",
+    }
+    assert all("existing_interpretation" not in payload for payload in payloads)
+    assert all(payload["complete_question"]["stem"] == "公共题干一" for payload in payloads)
+    assert all("原有知识点释义" not in prompt for prompt in system_prompts)
+
+
+def test_score_existing_pairs_by_name_keeps_missing_question_as_error(tmp_path, monkeypatch):
+    questions = tmp_path / "questions.jsonl"
+    prior_scores = tmp_path / "prior-scores.jsonl"
+    output = tmp_path / "name-scores.jsonl"
+    write_jsonl(questions, [])
+    write_jsonl(prior_scores, [
+        dict(question_id="missing", label_id="1", knw_label="知识点@标签"),
+    ])
+
+    monkeypatch.setattr(
+        matching,
+        "OpenAI",
+        lambda **kwargs: SimpleNamespace(chat=SimpleNamespace(completions=None)),
+    )
+    summary = matching.score_existing_pairs_by_name(
+        str(prior_scores),
+        str(questions),
+        str(output),
+        "http://example/v1",
+        "DeepSeek-V4-Flash",
+    )
+
+    assert summary == {"attempted": 1, "completed": 0, "errors": 1}
+    row = next(matching.read_jsonl(str(output)))[1]
+    assert row["status"] == "error"
+    assert row["error_type"] == "ValueError"
+    assert "不存在该question_id" in row["error"]
