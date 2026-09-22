@@ -91,6 +91,50 @@ def load_retrieval_records(path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def load_bm25_overrides(path: Path) -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            label_path = str(value.get("label_path") or "").strip()
+            bm25_text = str(value.get("bm25_text") or "").strip()
+            if not label_path:
+                raise ValueError(f"BM25覆盖文件第{line_number}行缺少label_path")
+            if not bm25_text:
+                raise ValueError(
+                    f"BM25覆盖文件第{line_number}行缺少bm25_text：{label_path}"
+                )
+            if label_path in overrides:
+                raise ValueError(f"BM25覆盖文件标签路径重复：{label_path}")
+            overrides[label_path] = bm25_text
+    if not overrides:
+        raise ValueError("BM25覆盖文件中没有可用标签")
+    return overrides
+
+
+def apply_bm25_overrides(
+    records: list[dict[str, Any]],
+    overrides: dict[str, str],
+) -> list[dict[str, Any]]:
+    known_paths = {record["label_path"] for record in records}
+    unknown_paths = sorted(set(overrides) - known_paths)
+    if unknown_paths:
+        raise ValueError(
+            "BM25覆盖文件包含未知标签：" + "、".join(unknown_paths)
+        )
+    return [
+        {
+            **record,
+            "bm25_text": overrides.get(
+                record["label_path"], record["bm25_text"]
+            ),
+        }
+        for record in records
+    ]
+
+
 def build_bm25_index(
     records: list[dict[str, Any]],
     ngram_sizes: tuple[int, ...],
@@ -281,6 +325,8 @@ def main() -> None:
     )
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--bm25-overrides", type=Path)
+    parser.add_argument("--expected-bm25-overrides", type=int, default=0)
     parser.add_argument(
         "--embedding-model", default="BAAI/bge-large-zh-v1.5"
     )
@@ -308,6 +354,18 @@ def main() -> None:
         raise ValueError(
             f"标签数量不是{args.expected_count}：{len(records)}"
         )
+    bm25_overrides: dict[str, str] = {}
+    if args.bm25_overrides:
+        bm25_overrides = load_bm25_overrides(args.bm25_overrides)
+        if (
+            args.expected_bm25_overrides
+            and len(bm25_overrides) != args.expected_bm25_overrides
+        ):
+            raise ValueError(
+                "BM25覆盖标签数量不是"
+                f"{args.expected_bm25_overrides}：{len(bm25_overrides)}"
+            )
+        records = apply_bm25_overrides(records, bm25_overrides)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     labels_path = args.output_dir / "labels.jsonl"
@@ -363,6 +421,12 @@ def main() -> None:
             "dimension": embedding_dimension,
         },
     }
+    if args.bm25_overrides:
+        manifest["bm25_overrides"] = {
+            "source": str(args.bm25_overrides),
+            "source_sha256": sha256_file(args.bm25_overrides),
+            "label_count": len(bm25_overrides),
+        }
     if "ngram_sizes" in bm25_index:
         manifest["bm25"]["ngram_sizes"] = bm25_index["ngram_sizes"]
     write_json(manifest_path, manifest)

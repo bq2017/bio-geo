@@ -3,12 +3,60 @@ import json
 import pytest
 
 from bio_geo_tagging.build_retrieval_index import (
+    apply_bm25_overrides,
     build_bm25_index,
     build_region_phrase_bm25_index,
+    load_bm25_overrides,
     load_retrieval_records,
     parse_ngram_sizes,
     tokenize_char_ngrams,
 )
+
+
+def test_bm25_overrides_replace_only_bm25_text(tmp_path):
+    path = tmp_path / "overrides.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "label_path": "知识点@自然地理@自然地理综合",
+                "bm25_text": "自然地理综合 气候 地貌 水文 植被 土壤",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    records = [
+        {
+            "label_path": "知识点@自然地理@自然地理综合",
+            "bm25_text": "旧BM25文本",
+            "embedding_text": "原BGE文本",
+        },
+        {
+            "label_path": "知识点@自然地理@地貌",
+            "bm25_text": "地貌原文本",
+            "embedding_text": "地貌BGE文本",
+        },
+    ]
+
+    result = apply_bm25_overrides(records, load_bm25_overrides(path))
+
+    assert result[0]["bm25_text"] == "自然地理综合 气候 地貌 水文 植被 土壤"
+    assert result[0]["embedding_text"] == "原BGE文本"
+    assert result[1] == records[1]
+
+
+def test_bm25_overrides_reject_unknown_label():
+    records = [
+        {
+            "label_path": "知识点@自然地理@自然地理综合",
+            "bm25_text": "旧BM25文本",
+            "embedding_text": "原BGE文本",
+        }
+    ]
+
+    with pytest.raises(ValueError, match="未知标签"):
+        apply_bm25_overrides(records, {"知识点@不存在": "新文本"})
 
 
 def test_load_retrieval_records_preserves_exact_names(tmp_path):
