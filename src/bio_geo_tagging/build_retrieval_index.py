@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-INDEX_VERSION = 1
+INDEX_VERSION = 2
+SHORT_CHINESE_SEGMENT_MAX_LENGTH = 12
 TEXT_SEGMENT_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+|[a-z0-9°%≈.+/\-]+")
 RETRIEVAL_LIST_FIELDS = (
     "exact_names",
@@ -33,7 +34,11 @@ def parse_ngram_sizes(value: str) -> tuple[int, ...]:
     return sizes
 
 
-def tokenize_char_ngrams(text: str, ngram_sizes: tuple[int, ...]) -> list[str]:
+def tokenize_char_ngrams(
+    text: str,
+    ngram_sizes: tuple[int, ...],
+    short_segment_max_length: int = SHORT_CHINESE_SEGMENT_MAX_LENGTH,
+) -> list[str]:
     normalized = unicodedata.normalize("NFKC", text).lower()
     tokens: list[str] = []
     for segment in TEXT_SEGMENT_RE.findall(normalized):
@@ -43,6 +48,11 @@ def tokenize_char_ngrams(text: str, ngram_sizes: tuple[int, ...]) -> list[str]:
                     segment[start : start + size]
                     for start in range(0, len(segment) - size + 1)
                 )
+            if (
+                0 < len(segment) <= short_segment_max_length
+                and len(segment) not in ngram_sizes
+            ):
+                tokens.append(segment)
         else:
             tokens.append(segment)
     return tokens
@@ -104,11 +114,12 @@ def build_bm25_index(
     index = build_token_bm25_index(
         records,
         token_lists,
-        tokenizer="unicode_char_ngram",
+        tokenizer="unicode_char_ngram_with_short_segments",
         k1=k1,
         b=b,
     )
     index["ngram_sizes"] = list(ngram_sizes)
+    index["short_segment_max_length"] = SHORT_CHINESE_SEGMENT_MAX_LENGTH
     return index
 
 
@@ -295,7 +306,7 @@ def main() -> None:
         choices=("char_ngram", "region_phrase"),
         default="char_ngram",
     )
-    parser.add_argument("--char-ngrams", type=parse_ngram_sizes, default=(1, 2))
+    parser.add_argument("--char-ngrams", type=parse_ngram_sizes, default=(2, 3))
     parser.add_argument("--bm25-k1", type=float, default=1.5)
     parser.add_argument("--bm25-b", type=float, default=0.75)
     parser.add_argument("--expected-count", type=int, default=414)
@@ -365,6 +376,10 @@ def main() -> None:
     }
     if "ngram_sizes" in bm25_index:
         manifest["bm25"]["ngram_sizes"] = bm25_index["ngram_sizes"]
+    if "short_segment_max_length" in bm25_index:
+        manifest["bm25"]["short_segment_max_length"] = bm25_index[
+            "short_segment_max_length"
+        ]
     write_json(manifest_path, manifest)
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
 

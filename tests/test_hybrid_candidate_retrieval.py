@@ -303,28 +303,36 @@ def test_fusion_keeps_strong_single_route_above_two_weak_routes():
     assert result[1]["support_count"] == 2
 
 
-def test_nonregion_combination_keeps_quota_and_fused_candidates():
+def test_nonregion_combination_keeps_bm25_primary_and_adds_new_bge_labels():
     bm25 = [
-        {"rank": rank, "label_path": f"label-{rank}", "score": 1.0 / rank}
-        for rank in range(1, 21)
-    ]
-    bge = [
         {"rank": rank, "label_path": f"label-{rank}", "score": 1.0 / rank}
         for rank in range(1, 31)
     ]
-    final, fused = combine_nonregion_candidates(
+    bge = [
+        {
+            "rank": rank,
+            "label_path": f"label-{rank + 15}",
+            "score": 1.0 / rank,
+        }
+        for rank in range(1, 31)
+    ]
+    final, supplements = combine_nonregion_candidates(
         bm25,
         bge,
-        agreement_weight=0.25,
-        limit=35,
+        limit=30,
     )
 
-    labels = {item["label_path"] for item in final}
-    assert len(final) == 25
-    assert len(fused) == 25
-    assert "label-23" in labels
-    assert "label-25" in labels
-    assert "label-26" not in labels
+    assert len(final) == 30
+    assert [item["label_path"] for item in final[:21]] == [
+        f"label-{rank}" for rank in range(1, 22)
+    ]
+    assert [item["label_path"] for item in supplements] == [
+        f"label-{rank}" for rank in range(22, 31)
+    ]
+    assert all(
+        item["selection_source"] == "bge_supplement"
+        for item in supplements
+    )
 
 
 def make_index(index_dir: Path) -> None:
