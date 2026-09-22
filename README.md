@@ -168,6 +168,9 @@ PYTHONPATH=src python -m bio_geo_tagging.call1_candidate_retrieval \
 完整标签释义文件至少要提供 `label_path` 和 `definition`。也可以直接使用现有地理字段
 `positive_definition`/`assessment_scope`，或
 `knowledge_scope`/`common_exam_content`/`distinction_from_similar_labels`。
+正式地理释义文件也可使用 `knw_label` 和嵌套的 `existing_interpretation`；其中
+`definition`、`keywords`、`exam_methods`、`distinction`会映射到精排字段，数字
+`label_id`作为taxonomy ID保留。
 建议正式运行前为全部标签补齐相邻标签边界。
 
 整题召回结果可以直接用于小题精排：程序优先按小题查找候选，找不到时按
@@ -176,13 +179,17 @@ PYTHONPATH=src python -m bio_geo_tagging.call1_candidate_retrieval \
 题目明确依赖图片但没有文字描述时，Prompt会要求模型标记
 `context_insufficient=true`，不得根据答案或解析猜测图片内容。
 
+普通题执行一次全部候选精排。大题的每个小题分别判断非综合标签，公共题干只作上下文；
+同时以公共题干和全部小题执行一次综合Label专项判断。最终
+`question_predictions.jsonl`将各小题标签与整题综合标签合并为整道题结果。
+
 示例：
 
 ```bash
 PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication \
   --units data/annotation/geography-tagging-units.jsonl \
   --candidates runs/retrieval/geography-hybrid-candidates.jsonl \
-  --labels data/taxonomy/geography-adjudication-labels.jsonl \
+  --labels data/taxonomy/geography-existing-definitions.jsonl \
   --audited-exclusions configs/geography_adjudication_audited_exclusions.json \
   --run-dir runs/adjudication/geography-smoke-50 \
   --endpoint http://172.22.0.35:9204/v1/chat/completions \
@@ -198,8 +205,9 @@ PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication \
 ```
 
 输出目录包含 `evidence.jsonl`、`predictions.jsonl`、`report.json`、
-`tail_selected.jsonl` 和 `run_manifest.json`。输入文件、模型、Prompt或限制发生变化时，
-必须使用新的运行目录。
+`question_predictions.jsonl`、`tail_selected.jsonl` 和 `run_manifest.json`。
+`predictions.jsonl`是逐小题/逐综合专项结果，`question_predictions.jsonl`是整道题最终并集。
+输入文件、模型、Prompt或限制发生变化时，必须使用新的运行目录。
 
 ## 原标签与原释义匹配评分
 

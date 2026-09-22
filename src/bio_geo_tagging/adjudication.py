@@ -16,7 +16,7 @@ from typing import Any, Iterable
 from bio_geo_tagging.ds import DSRequestError, append_evidence, parse_json_content
 
 
-PROMPT_VERSION = "geography-candidate-adjudication-v1.0-hard-boundaries"
+PROMPT_VERSION = "geography-candidate-adjudication-v1.1-comprehensive-pass"
 CANDIDATE_ORDER_VERSION = "geography-candidate-order-v1"
 IMAGE_REFERENCE_RE = re.compile(r"(?:读图|据图|下图|上图|图中|该图|如图|示意图|图示)")
 
@@ -82,38 +82,50 @@ def make_unit_key(unit: dict[str, Any]) -> str:
 
 
 def load_labels(path: str | Path) -> dict[str, dict[str, str]]:
-    """Load the canonical schema and the two geography definition schemas."""
+    """Load geography labels and key them by the candidate-facing label path."""
     labels: dict[str, dict[str, str]] = {}
     for line_number, row in enumerate(_read_jsonl(path), 1):
-        label_path = _as_text(row.get("label_path"))
-        label_id = _as_text(row.get("label_id") or label_path)
-        if not label_id or not label_path:
-            raise ValueError(f"label line {line_number} lacks label_id or label_path")
-        if label_id in labels:
-            raise ValueError(f"duplicate label_id: {label_id}")
+        interpretation = row.get("existing_interpretation")
+        if not isinstance(interpretation, dict):
+            interpretation = {}
+        label_path = _as_text(row.get("label_path") or row.get("knw_label"))
+        taxonomy_label_id = _as_text(row.get("label_id"))
+        if not label_path:
+            raise ValueError(f"label line {line_number} lacks label_path or knw_label")
+        if label_path in labels:
+            raise ValueError(f"duplicate label_path: {label_path}")
         label_name = _as_text(row.get("label_name")) or label_path.rsplit("@", 1)[-1]
         definition = _as_text(
             row.get("definition")
             or row.get("positive_definition")
             or row.get("knowledge_scope")
+            or interpretation.get("definition")
         )
         core_concepts = _as_text(
             row.get("core_concepts")
             or row.get("assessment_scope")
             or row.get("common_exam_content")
+            or interpretation.get("keywords")
         )
         distinctions = _as_text(
-            row.get("distinctions") or row.get("distinction_from_similar_labels")
+            row.get("distinctions")
+            or row.get("distinction_from_similar_labels")
+            or interpretation.get("distinction")
+        )
+        assessment_scope = _as_text(
+            row.get("exam_methods") or interpretation.get("exam_methods")
         )
         if not definition:
-            raise ValueError(f"label {label_id} lacks a usable definition")
-        labels[label_id] = {
-            "label_id": label_id,
+            raise ValueError(f"label {label_path} lacks a usable definition")
+        labels[label_path] = {
+            "label_id": label_path,
+            "taxonomy_label_id": taxonomy_label_id,
             "label_name": label_name,
             "label_path": label_path,
             "definition": definition,
             "core_concepts": core_concepts,
             "distinctions": distinctions,
+            "assessment_scope": assessment_scope,
         }
     if not labels:
         raise ValueError("labels file is empty")
@@ -223,6 +235,39 @@ class CandidateIndex:
                     f"ambiguous candidates for {identifier}; provide matching unit_key"
                 )
         raise ValueError(f"missing candidates for unit: {unit_key}")
+
+
+def _is_comprehensive_label(label: dict[str, str]) -> bool:
+    return "综合" in label["label_name"]
+
+
+def _is_comprehensive_candidate(
+    candidate: dict[str, Any], label: dict[str, str]
+) -> bool:
+    return _is_comprehensive_label(label) or (
+        candidate.get("support_count") is not None
+        and candidate.get("fusion_score") is not None
+    )
+
+
+def candidates_for_unit(
+    unit: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    labels_by_id: dict[str, dict[str, str]],
+) -> list[dict[str, Any]]:
+    """Reserve comprehensive labels for the whole-question comprehensive pass."""
+    input_role = _as_text(unit.get("input_role") or unit.get("unit_type"))
+    if input_role not in {"subquestion", "whole_question_comprehensive"}:
+        return list(candidates)
+    comprehensive_only = input_role == "whole_question_comprehensive"
+    return [
+        candidate
+        for candidate in candidates
+        if _is_comprehensive_candidate(
+            candidate, labels_by_id[candidate["label_id"]]
+        )
+        == comprehensive_only
+    ]
 
 
 def load_audited_exclusions(
@@ -336,12 +381,13 @@ def build_adjudication_inputs(
     analysis = unit.get("analysis")
     if analysis is None:
         analysis = unit.get("explanation")
-    question = {
+    input_role = _as_text(unit.get("input_role") or unit.get("unit_type"))
+    question: dict[str, Any] = {
         "question_id": question_id,
         "root_question_id": _as_text(
             unit.get("root_question_id") or unit.get("parent_id") or question_id
         ),
-        "unit_type": _as_text(unit.get("input_role") or unit.get("unit_type")),
+        "unit_type": input_role,
         "parent_stem": _as_text(
             unit.get("context_stem") or unit.get("parent_stem")
         )[:3000],
@@ -359,6 +405,33 @@ def build_adjudication_inputs(
         ),
         "image_context_missing": _image_context_missing(unit),
     }
+    if input_role == "whole_question_comprehensive":
+        raw_sub_questions = unit.get("sub_questions")
+        if not isinstance(raw_sub_questions, list) or not raw_sub_questions:
+            raise ValueError(
+                "whole_question_comprehensive unit must contain sub_questions"
+            )
+        question["sub_questions"] = []
+        for sub_question in raw_sub_questions:
+            if not isinstance(sub_question, dict):
+                raise ValueError("sub_questions must contain JSON objects")
+            sub_analysis = sub_question.get("analysis")
+            if sub_analysis is None:
+                sub_analysis = sub_question.get("explanation")
+            question["sub_questions"].append(
+                {
+                    "question_id": _as_text(sub_question.get("question_id")),
+                    "stem": _as_text(sub_question.get("stem"))[:5000],
+                    "options": _as_text(sub_question.get("options"))[:3000],
+                    "answer_text": _as_text(
+                        sub_question.get("answer") or sub_question.get("answer_text")
+                    )[:2000],
+                    "analysis": _as_text(sub_analysis)[:6000],
+                    "image_description": _as_text(
+                        sub_question.get("image_description")
+                    )[:3000],
+                }
+            )
     return question, candidate_cards, code_map
 
 
@@ -370,9 +443,15 @@ def build_adjudication_prompt(
     question, candidate_cards, code_map = build_adjudication_inputs(
         unit, candidates, labels_by_id
     )
+    if question["unit_type"] == "whole_question_comprehensive":
+        scope_instruction = """本次是整道大题的综合Label专项判定。你可以阅读公共题干和全部小题，但候选中只提供综合Label。只有多个小题或同一小题中的知识必须跨模块联动、共同形成一个不可拆分的综合判断，并且符合综合Label定义时才选择。仅仅因为整道题包含多个独立知识点、多个小题或同一章节内容，不得选择综合Label。"""
+    else:
+        scope_instruction = """本次只判断当前普通题或当前小题。大题小题的公共题干只用于补足当前小题明确指代的对象和语境，不得引入兄弟小题的知识。综合Label由独立的整题专项判定处理，本次候选中不应选择综合Label。"""
     prompt = f"""你是严谨的高中地理知识点判标器。本任务高精度优先：错标的代价远高于漏标。可以少选、selected=[]或要求扩召；不得为提高覆盖率加入只是相关、同章节、上下位邻近、同一因果链或常见伴随出现的Label。
 
 任务是判断当前题目或当前小题是否直接考查候选Label所定义的知识范围，而不是寻找所有相关知识。只输出简短结论，不输出详细思考过程。
+
+{scope_instruction}
 
 一、先界定Label
 Label有效范围由label_name、label_path、definition和distinctions共同确定。distinctions是硬否决边界。core_concepts只解释范围内的概念、规律和方法，不能扩大Label范围；只命中一个地名、现象、材料、关键词或底层机制不足以选中Label。
@@ -382,7 +461,7 @@ Label有效范围由label_name、label_path、definition和distinctions共同确
 2. 空间或时间尺度不一致：全球、国家、区域、城市和局地尺度不能互相替代；日变化、季节变化、年际变化和长期演化不能互相替代。
 3. 任务维度不一致：分布、特征、成因、条件、过程、影响、措施、评价、预测、计算和判读不能互相替代。处于同一因果链不等于全部都是考点。
 4. 自然与人文机制不一致：自然条件作为材料背景不等于直接考查自然地理机制；人类活动作为现象背景也不等于直接考查相应人文地理Label。
-5. 当前小题范围不一致：只判断当前小题。parent_stem和父题图片描述只能补足当前小题明确指代的对象、时空和图表语境，不能单独制造考点。兄弟小题的知识不选。
+5. 判标范围不一致：普通题或小题判定只判断当前对象；parent_stem和父题图片描述只能补足当前小题明确指代的对象、时空和图表语境，不能单独制造考点，兄弟小题的知识不选。整题综合专项只判断是否成立综合Label，不得借机补选普通Label。
 6. 与distinctions冲突：题目落在distinctions排除的一侧时立即拒绝。
 
 三、还原当前任务
@@ -397,7 +476,7 @@ Label有效范围由label_name、label_path、definition和distinctions共同确
 五、特殊Label
 1. 区域Label：在某地区应用通用规律时可选真正被考查的通用Label；只有地区本身的区域特征或区域联系被直接考查时才选区域Label。两者分别直接考查时才可同选。
 2. 地图、图表、遥感、调查、计算和方法类Label：只有当前设问真正考查相应判读规则、计算方法、数据解读、操作或评价时才选择。地图或图表仅作为信息载体时，不自动选择工具方法Label。
-3. 综合Label：只有当前设问要求联动多个子知识形成一个联合判断，且符合该Label定义时才选择。大题含多个独立小问不等于考查综合Label。
+3. 综合Label：只在整题综合专项中判断。只有多个知识必须联动形成一个不可拆分的联合判断，且符合该Label定义时才选择。大题包含多个彼此独立的小问不等于考查综合Label。
 
 六、evidence与最终复核
 每个selected Label必须提供一条不超过60字的evidence，逐字复制自当前stem、options、answer_text、analysis、image_description，或在当前小题存在明确指代时复制自parent_stem和parent_image_description。不得改写或推理补写。evidence必须支持直接考查，而不只是证明二者相关。
@@ -489,6 +568,7 @@ def validate_adjudication_result(
                 "analysis",
                 "image_description",
                 "parent_image_description",
+                "sub_questions",
             )
         )
     )
@@ -536,6 +616,79 @@ def _latest_success(
     return completed, evidence_rows
 
 
+def write_question_predictions(
+    path: Path, predictions: list[dict[str, Any]]
+) -> dict[str, int]:
+    """Union sub-question labels with the whole-question comprehensive decision."""
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    root_order: list[str] = []
+    for prediction in predictions:
+        root_question_id = _as_text(prediction.get("root_question_id"))
+        if root_question_id not in grouped:
+            root_order.append(root_question_id)
+        grouped[root_question_id].append(prediction)
+
+    temporary = path.with_name(f".{path.name}.tmp")
+    usable_count = 0
+    review_count = 0
+    with temporary.open("w", encoding="utf-8", newline="\n") as output:
+        for root_question_id in root_order:
+            components = grouped[root_question_id]
+            selected_by_id: dict[str, dict[str, Any]] = {}
+            for component in components:
+                for selected in component["selected_labels"]:
+                    label_id = _as_text(selected.get("label_id"))
+                    if label_id not in selected_by_id:
+                        selected_by_id[label_id] = {
+                            key: value
+                            for key, value in selected.items()
+                            if key != "evidence"
+                        }
+                        selected_by_id[label_id]["evidence_by_unit"] = []
+                    selected_by_id[label_id]["evidence_by_unit"].append(
+                        {
+                            "unit_key": component["unit_key"],
+                            "question_id": component["question_id"],
+                            "input_role": component["input_role"],
+                            "evidence": selected["evidence"],
+                        }
+                    )
+            selected_labels = sorted(
+                selected_by_id.values(),
+                key=lambda label: (label["candidate_rank"], label["label_id"]),
+            )
+            needs_review = any(component["needs_review"] for component in components)
+            usable_for_training = bool(selected_labels and not needs_review)
+            usable_count += int(usable_for_training)
+            review_count += int(needs_review)
+            record = {
+                "root_question_id": root_question_id,
+                "selected_labels": selected_labels,
+                "component_units": [
+                    {
+                        "unit_key": component["unit_key"],
+                        "question_id": component["question_id"],
+                        "input_role": component["input_role"],
+                        "none_of_candidates": component["none_of_candidates"],
+                        "need_expand_recall": component["need_expand_recall"],
+                        "context_insufficient": component["context_insufficient"],
+                    }
+                    for component in components
+                ],
+                "needs_review": needs_review,
+                "usable_for_training": usable_for_training,
+                "model": components[0]["model"],
+                "prompt_version": components[0]["prompt_version"],
+            }
+            output.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    temporary.replace(path)
+    return {
+        "whole_questions": len(root_order),
+        "whole_questions_usable_for_training": usable_count,
+        "whole_questions_needing_review": review_count,
+    }
+
+
 def run_adjudication(
     units_path: str | Path,
     candidates_path: str | Path,
@@ -562,15 +715,17 @@ def run_adjudication(
         raise ValueError("units contain duplicate unit keys")
     candidate_index = CandidateIndex(_read_jsonl(candidates_path))
     labels_by_id = load_labels(labels_path)
-    candidates_by_unit = {
-        make_unit_key(unit): candidate_index.resolve(unit) for unit in units
-    }
-    for candidates in candidates_by_unit.values():
-        for candidate in candidates:
+    candidates_by_unit: dict[str, list[dict[str, Any]]] = {}
+    for unit in units:
+        resolved_candidates = candidate_index.resolve(unit)
+        for candidate in resolved_candidates:
             if candidate["label_id"] not in labels_by_id:
                 raise ValueError(
                     f"candidate uses unknown label_id: {candidate['label_id']}"
                 )
+        candidates_by_unit[make_unit_key(unit)] = candidates_for_unit(
+            unit, resolved_candidates, labels_by_id
+        )
     audited_exclusions = (
         load_audited_exclusions(audited_exclusions_path)
         if audited_exclusions_path is not None
@@ -757,6 +912,7 @@ def run_adjudication(
     audited_exclusion_questions = 0
     audited_excluded_labels = 0
     unknown_selected_codes_dropped_count = 0
+    materialized_predictions: list[dict[str, Any]] = []
 
     with (
         predictions_temporary.open("w", encoding="utf-8", newline="\n") as output,
@@ -781,6 +937,7 @@ def run_adjudication(
                 selected_labels.append(
                     {
                         "label_id": label_id,
+                        "taxonomy_label_id": label.get("taxonomy_label_id", ""),
                         "label_name": label["label_name"],
                         "label_path": label["label_path"],
                         "candidate_rank": rank,
@@ -870,6 +1027,7 @@ def run_adjudication(
                 "model": model,
                 "prompt_version": PROMPT_VERSION,
             }
+            materialized_predictions.append(prediction)
             output.write(json.dumps(prediction, ensure_ascii=False, sort_keys=True) + "\n")
             if used_rank_21_plus:
                 tail_output.write(
@@ -882,6 +1040,9 @@ def run_adjudication(
                 )
     predictions_temporary.replace(predictions_path)
     tail_temporary.replace(tail_path)
+    question_prediction_summary = write_question_predictions(
+        output_dir / "question_predictions.jsonl", materialized_predictions
+    )
 
     success = len(completed)
     latencies = sorted(
@@ -959,6 +1120,7 @@ def run_adjudication(
         "candidate_count_distribution": candidate_count_distribution,
         "model": model,
         "prompt_version": PROMPT_VERSION,
+        **question_prediction_summary,
     }
     _write_json_atomic(output_dir / "report.json", report)
     return report

@@ -17,6 +17,8 @@ def test_expand_question_propagates_only_parent_image_description():
             }
         )
     )
+    assert units[0]["input_role"] == "whole_question_comprehensive"
+    assert units[0]["sub_questions"][0]["question_id"] == "child-1"
     assert units[1]["context_image_description"] == "等高线图，甲地海拔高于乙地"
     assert "context_stem_image_url" not in units[1]
 
@@ -62,10 +64,18 @@ def test_process_file_expands_root_and_sub_questions(tmp_path):
             "stem": "公共题干",
             "options": "",
             "analysis": "",
-            "knw_labels": ["知识点@大题标签"],
-            "input_role": "root",
+            "input_role": "whole_question_comprehensive",
             "root_question_id": "parent-1",
             "context_stem": "",
+            "sub_questions": [
+                {
+                    "parent_id": "parent-1",
+                    "question_id": "child-1",
+                    "stem": "小题一",
+                    "options": "A. 选项",
+                    "analysis": "小题解析",
+                }
+            ],
         },
         {
             "parent_id": "parent-1",
@@ -73,7 +83,6 @@ def test_process_file_expands_root_and_sub_questions(tmp_path):
             "stem": "小题一",
             "options": "A. 选项",
             "analysis": "小题解析",
-            "knw_labels": ["知识点@小题标签"],
             "input_role": "subquestion",
             "root_question_id": "parent-1",
             "context_stem": "公共题干",

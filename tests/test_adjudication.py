@@ -7,10 +7,12 @@ from bio_geo_tagging.adjudication import (
     CandidateIndex,
     build_adjudication_inputs,
     build_adjudication_prompt,
+    candidates_for_unit,
     load_labels,
     normalize_candidates,
     run_adjudication,
     validate_adjudication_result,
+    write_question_predictions,
 )
 from bio_geo_tagging.ds import DSResponse
 
@@ -113,6 +115,56 @@ def test_load_labels_accepts_existing_geography_definition_fields(tmp_path):
     labels = load_labels(labels_path)
     assert labels["知识点@地理工具@经纬网"]["label_name"] == "经纬网"
     assert labels["知识点@自然地理@气候"]["distinctions"] == "不含天气现象"
+
+
+def test_load_labels_accepts_nested_existing_interpretation_schema(tmp_path):
+    labels_path = tmp_path / "labels.jsonl"
+    write_jsonl(
+        labels_path,
+        [
+            {
+                "label_id": "2276111643787415552",
+                "knw_label": "知识点@地理工具@地球仪",
+                "existing_interpretation": {
+                    "definition": "认识地球仪的构造及空间意义",
+                    "keywords": "地轴、两极、赤道、经线、纬线",
+                    "exam_methods": "根据经纬网进行基础定位",
+                    "distinction": "不含经纬网推理性应用",
+                },
+            }
+        ],
+    )
+    labels = load_labels(labels_path)
+    label = labels["知识点@地理工具@地球仪"]
+    assert label["label_id"] == "知识点@地理工具@地球仪"
+    assert label["taxonomy_label_id"] == "2276111643787415552"
+    assert label["definition"] == "认识地球仪的构造及空间意义"
+    assert label["core_concepts"] == "地轴、两极、赤道、经线、纬线"
+    assert label["assessment_scope"] == "根据经纬网进行基础定位"
+    assert label["distinctions"] == "不含经纬网推理性应用"
+
+
+def test_comprehensive_candidates_are_reserved_for_whole_question_pass():
+    labels = {
+        "知识点@交通区位": {
+            "label_name": "交通区位",
+        },
+        "知识点@交通综合": {
+            "label_name": "交通综合",
+        },
+    }
+    candidates = [
+        {"label_id": "知识点@交通区位"},
+        {"label_id": "知识点@交通综合"},
+    ]
+    subquestion = candidates_for_unit(
+        {"input_role": "subquestion"}, candidates, labels
+    )
+    whole = candidates_for_unit(
+        {"input_role": "whole_question_comprehensive"}, candidates, labels
+    )
+    assert [item["label_id"] for item in subquestion] == ["知识点@交通区位"]
+    assert [item["label_id"] for item in whole] == ["知识点@交通综合"]
 
 
 def test_build_prompt_maps_geography_fields_and_detects_missing_image():
@@ -265,6 +317,13 @@ def test_run_adjudication_materializes_and_resumes(tmp_path):
     assert prediction["selected_labels"][0]["label_path"] == "知识点@自然地理@气温"
     assert prediction["selected_labels"][0]["candidate_rank"] == 1
     assert prediction["root_question_id"] == "root-1"
+    question_prediction = json.loads(
+        (run_dir / "question_predictions.jsonl").read_text(encoding="utf-8").strip()
+    )
+    assert question_prediction["root_question_id"] == "root-1"
+    assert question_prediction["selected_labels"][0]["evidence_by_unit"][0][
+        "question_id"
+    ] == "child-1"
 
     second = run_adjudication(
         units_path,
@@ -344,3 +403,56 @@ def test_audited_exclusion_removes_selected_label(tmp_path):
     )
     assert prediction["selected_labels"] == []
     assert prediction["usable_for_training"] is False
+
+
+def test_question_predictions_union_subquestions_and_comprehensive_label(tmp_path):
+    base = {
+        "root_question_id": "root-1",
+        "none_of_candidates": False,
+        "need_expand_recall": False,
+        "context_insufficient": False,
+        "needs_review": False,
+        "model": "test-model",
+        "prompt_version": "test-prompt",
+    }
+    predictions = [
+        {
+            **base,
+            "unit_key": "root-1|child-1|subquestion",
+            "question_id": "child-1",
+            "input_role": "subquestion",
+            "selected_labels": [
+                {
+                    "label_id": "知识点@交通区位",
+                    "label_path": "知识点@交通区位",
+                    "label_name": "交通区位",
+                    "candidate_rank": 2,
+                    "evidence": "分析港口建设的区位条件",
+                }
+            ],
+        },
+        {
+            **base,
+            "unit_key": "root-1|root-1|whole_question_comprehensive",
+            "question_id": "root-1",
+            "input_role": "whole_question_comprehensive",
+            "selected_labels": [
+                {
+                    "label_id": "知识点@交通综合",
+                    "label_path": "知识点@交通综合",
+                    "label_name": "交通综合",
+                    "candidate_rank": 35,
+                    "evidence": "综合分析交通布局与区域发展的关系",
+                }
+            ],
+        },
+    ]
+    summary = write_question_predictions(tmp_path / "questions.jsonl", predictions)
+    record = json.loads(
+        (tmp_path / "questions.jsonl").read_text(encoding="utf-8").strip()
+    )
+    assert summary["whole_questions"] == 1
+    assert [label["label_path"] for label in record["selected_labels"]] == [
+        "知识点@交通区位",
+        "知识点@交通综合",
+    ]
