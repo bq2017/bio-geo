@@ -21,7 +21,7 @@ def configure_logging(log_file: str) -> None:
 
 
 def expand_question(question: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
-    """Yield an ordinary unit, or sub-questions plus region/comprehensive passes."""
+    """Yield an ordinary unit, or sub-questions plus one comprehensive pass."""
     root_question_id = question.get("question_id", "")
     root_stem = question.get("stem", "")
     sub_questions = question.get("sub_questions", [])
@@ -50,9 +50,6 @@ def expand_question(question: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
             }
             for sub_question in valid_sub_questions
         ]
-        region_unit = dict(root_unit)
-        region_unit["input_role"] = "whole_question_region"
-        yield region_unit
         root_unit["input_role"] = "whole_question_comprehensive"
     else:
         root_unit["input_role"] = "root"
@@ -79,7 +76,6 @@ def process_file(input_file: str, output_file: str, log_file: str) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
 
     root_count = 0
-    region_count = 0
     comprehensive_count = 0
     sub_question_count = 0
 
@@ -97,20 +93,17 @@ def process_file(input_file: str, output_file: str, log_file: str) -> None:
                 output_stream.write(json.dumps(unit, ensure_ascii=False) + "\n")
                 if unit["input_role"] == "root":
                     root_count += 1
-                elif unit["input_role"] == "whole_question_region":
-                    region_count += 1
                 elif unit["input_role"] == "whole_question_comprehensive":
                     comprehensive_count += 1
                 else:
                     sub_question_count += 1
 
     print(f"普通题打标单元: {root_count}")
-    print(f"整题区域标签打标单元: {region_count}")
     print(f"整题综合标签打标单元: {comprehensive_count}")
     print(f"小题打标单元: {sub_question_count}")
     print(
         "打标单元总数: "
-        f"{root_count + region_count + comprehensive_count + sub_question_count}"
+        f"{root_count + comprehensive_count + sub_question_count}"
     )
     print(f"处理完成，输出文件: {output_file}")
 

@@ -14,10 +14,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from bio_geo_tagging.ds import DSRequestError, append_evidence, parse_json_content
-from bio_geo_tagging.hybrid_candidate_retrieval import is_region_label_path
 
 
-PROMPT_VERSION = "geography-candidate-adjudication-v1.2-region-comprehensive-passes"
+PROMPT_VERSION = "geography-candidate-adjudication-v1.3-subquestion-region-labels"
 CANDIDATE_ORDER_VERSION = "geography-candidate-order-v1"
 IMAGE_REFERENCE_RE = re.compile(r"(?:读图|据图|下图|上图|图中|该图|如图|示意图|图示)")
 
@@ -286,24 +285,17 @@ def candidates_for_unit(
     candidates: list[dict[str, Any]],
     labels_by_id: dict[str, dict[str, str]],
 ) -> list[dict[str, Any]]:
-    """Route ordinary, regional, and comprehensive labels to separate passes."""
+    """Keep regional labels with ordinary labels; reserve comprehensive labels."""
     input_role = _as_text(unit.get("input_role") or unit.get("unit_type"))
-    if input_role not in {
-        "subquestion",
-        "whole_question_region",
-        "whole_question_comprehensive",
-    }:
+    if input_role not in {"subquestion", "whole_question_comprehensive"}:
         return list(candidates)
     selected: list[dict[str, Any]] = []
     for candidate in candidates:
         label = labels_by_id[candidate["label_id"]]
         is_comprehensive = _is_comprehensive_candidate(candidate, label)
-        is_region = is_region_label_path(label["label_path"])
         if input_role == "whole_question_comprehensive" and is_comprehensive:
             selected.append(candidate)
-        elif input_role == "whole_question_region" and is_region and not is_comprehensive:
-            selected.append(candidate)
-        elif input_role == "subquestion" and not is_region and not is_comprehensive:
+        elif input_role == "subquestion" and not is_comprehensive:
             selected.append(candidate)
     return selected
 
@@ -457,7 +449,7 @@ def build_adjudication_inputs(
         ),
         "image_context_missing": _image_context_missing(unit),
     }
-    if input_role in {"whole_question_region", "whole_question_comprehensive"}:
+    if input_role == "whole_question_comprehensive":
         raw_sub_questions = unit.get("sub_questions")
         if not isinstance(raw_sub_questions, list) or not raw_sub_questions:
             raise ValueError(
@@ -497,12 +489,10 @@ def build_adjudication_prompt(
     )
     if question["unit_type"] == "whole_question_comprehensive":
         scope_instruction = """本次是整道大题的综合Label专项判定。你可以阅读公共题干和全部小题，但候选中只提供综合Label。只有多个小题或同一小题中的知识必须跨模块联动、共同形成一个不可拆分的综合判断，并且符合综合Label定义时才选择。仅仅因为整道题包含多个独立知识点、多个小题或同一章节内容，不得选择综合Label。"""
-    elif question["unit_type"] == "whole_question_region":
-        scope_instruction = """本次是整道大题的区域Label专项判定。你可以阅读公共题干和全部小题，但候选中只提供区域Label。只有至少一个小题必须调用该区域特有的位置、环境特征、空间差异、区域联系或区域发展知识才能完成关键判断时，才选择该区域Label。地名、行政区名、城市名或区域仅作为材料发生地、案例载体或定位信息时不得选择。"""
     elif question["unit_type"] == "root":
         scope_instruction = """本次判断一道不含小题的完整普通题。可以从候选中选择直接考查的普通Label、区域Label或综合Label，但每个Label都必须独立支持答案中的关键判断。区域仅作为材料发生地时不选区域Label；仅仅涉及多个知识点但不要求联动时不选综合Label。"""
     else:
-        scope_instruction = """本次只判断当前普通题或当前小题。大题小题的公共题干只用于补足当前小题明确指代的对象和语境，不得引入兄弟小题的知识。区域Label和综合Label分别由独立的整题专项判定处理，本次候选中不应选择这两类Label。"""
+        scope_instruction = """本次只判断当前小题。大题公共题干只用于补足当前小题明确指代的对象、区域和语境，不得引入兄弟小题的知识。可以同时选择直接考查的普通Label和区域Label；区域只作为材料发生地、案例载体或定位信息时不得选择。综合Label由独立的整题专项判定处理，本次候选中不应选择综合Label。"""
     prompt = f"""你是严谨的高中地理知识点判标器。本任务高精度优先：错标的代价远高于漏标。可以少选、selected=[]或要求扩召；不得为提高覆盖率加入只是相关、同章节、上下位邻近、同一因果链或常见伴随出现的Label。
 
 任务是判断当前题目或当前小题是否直接考查候选Label所定义的知识范围，而不是寻找所有相关知识。只输出简短结论，不输出详细思考过程。
@@ -517,7 +507,7 @@ Label有效范围由label_name、label_path、definition和distinctions共同确
 2. 空间或时间尺度不一致：全球、国家、区域、城市和局地尺度不能互相替代；日变化、季节变化、年际变化和长期演化不能互相替代。
 3. 任务维度不一致：分布、特征、成因、条件、过程、影响、措施、评价、预测、计算和判读不能互相替代。处于同一因果链不等于全部都是考点。
 4. 自然与人文机制不一致：自然条件作为材料背景不等于直接考查自然地理机制；人类活动作为现象背景也不等于直接考查相应人文地理Label。
-5. 判标范围不一致：普通题或小题判定只判断当前对象；parent_stem和父题图片描述只能补足当前小题明确指代的对象、时空和图表语境，不能单独制造考点，兄弟小题的知识不选。整题区域专项只判断区域Label，整题综合专项只判断综合Label，均不得借机补选普通Label。
+5. 判标范围不一致：普通题或小题判定只判断当前对象；parent_stem和父题图片描述只能补足当前小题明确指代的对象、时空和图表语境，不能单独制造考点，兄弟小题的知识不选。整题综合专项只判断综合Label，不得借机补选普通Label或区域Label。
 6. 与distinctions冲突：题目落在distinctions排除的一侧时立即拒绝。
 
 三、还原当前任务

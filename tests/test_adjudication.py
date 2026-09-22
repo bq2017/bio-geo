@@ -100,11 +100,6 @@ def test_limit_counts_root_questions_without_splitting_big_question():
         {
             "question_id": "root-1",
             "root_question_id": "root-1",
-            "input_role": "whole_question_region",
-        },
-        {
-            "question_id": "root-1",
-            "root_question_id": "root-1",
             "input_role": "whole_question_comprehensive",
         },
         {
@@ -120,7 +115,6 @@ def test_limit_counts_root_questions_without_splitting_big_question():
     ]
     selected = limit_units_by_root(units, 1)
     assert [unit["question_id"] for unit in selected] == [
-        "root-1",
         "root-1",
         "child-1",
     ]
@@ -176,7 +170,7 @@ def test_load_labels_accepts_nested_existing_interpretation_schema(tmp_path):
     assert label["distinctions"] == "不含经纬网推理性应用"
 
 
-def test_comprehensive_candidates_are_reserved_for_whole_question_pass():
+def test_subquestions_include_region_candidates_and_reserve_comprehensive_candidates():
     labels = {
         "知识点@交通区位": {
             "label_name": "交通区位",
@@ -202,11 +196,10 @@ def test_comprehensive_candidates_are_reserved_for_whole_question_pass():
     whole = candidates_for_unit(
         {"input_role": "whole_question_comprehensive"}, candidates, labels
     )
-    region = candidates_for_unit(
-        {"input_role": "whole_question_region"}, candidates, labels
-    )
-    assert [item["label_id"] for item in subquestion] == ["知识点@交通区位"]
-    assert [item["label_id"] for item in region] == ["知识点@珠江三角洲"]
+    assert [item["label_id"] for item in subquestion] == [
+        "知识点@交通区位",
+        "知识点@珠江三角洲",
+    ]
     assert [item["label_id"] for item in whole] == ["知识点@交通综合"]
 
 
@@ -448,7 +441,7 @@ def test_audited_exclusion_removes_selected_label(tmp_path):
     assert prediction["usable_for_training"] is False
 
 
-def test_question_predictions_union_subquestions_and_comprehensive_label(tmp_path):
+def test_question_predictions_union_subquestion_region_and_comprehensive_labels(tmp_path):
     base = {
         "root_question_id": "root-1",
         "none_of_candidates": False,
@@ -471,22 +464,14 @@ def test_question_predictions_union_subquestions_and_comprehensive_label(tmp_pat
                     "label_name": "交通区位",
                     "candidate_rank": 2,
                     "evidence": "分析港口建设的区位条件",
-                }
-            ],
-        },
-        {
-            **base,
-            "unit_key": "root-1|root-1|whole_question_region",
-            "question_id": "root-1",
-            "input_role": "whole_question_region",
-            "selected_labels": [
+                },
                 {
                     "label_id": "知识点@珠江三角洲地区",
                     "label_path": "知识点@珠江三角洲地区",
                     "label_name": "珠江三角洲地区",
                     "candidate_rank": 10,
                     "evidence": "分析珠江三角洲地区交通发展的区位条件",
-                }
+                },
             ],
         },
         {
