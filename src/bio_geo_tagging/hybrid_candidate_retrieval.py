@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -40,6 +41,21 @@ REGION_DIAGNOSTIC_LIMIT = 20
 REGION_REPRESENTATIVE_BGE_MAX_RANK = 10
 REGION_BGE_ONLY_MAX_RANK = 5
 COMPREHENSIVE_DIAGNOSTIC_LIMIT = 20
+BGE_QUERY_MODES = ("current", "structured-limit")
+
+EMBEDDED_QUESTION_MARKER = re.compile(
+    r"(?:[（(]\s*(?:\d{1,2}|[一二三四五六七八九十]+)\s*[）)]"
+    r"|(?m:^\s*(?:\d{1,2}|[一二三四五六七八九十]+)[.、])"
+    r"|[①②③④⑤⑥⑦⑧⑨⑩])"
+)
+
+STRUCTURED_FIELD_WEIGHTS = {
+    "public_material": 100,
+    "stems": 260,
+    "answers": 100,
+    "analyses": 240,
+    "options": 120,
+}
 
 # These labels contain “综合” in the leaf name, but describe a concrete topic or
 # question type rather than an umbrella label. They stay in the original V3 pool.
@@ -97,6 +113,225 @@ def question_query_text(question: dict[str, Any]) -> str:
     for sub_question in sub_questions:
         append_fields(sub_question)
     return "\n".join(parts)
+
+
+def split_embedded_questions(stem: str) -> tuple[str, list[str], bool]:
+    matches = list(EMBEDDED_QUESTION_MARKER.finditer(stem))
+    if len(matches) < 2:
+        return "", [stem] if stem else [], False
+    public_material = stem[: matches[0].start()].strip()
+    questions = [
+        stem[match.start() : matches[index + 1].start()].strip()
+        if index + 1 < len(matches)
+        else stem[match.start() :].strip()
+        for index, match in enumerate(matches)
+    ]
+    return public_material, [text for text in questions if text], True
+
+
+def tokenizer_ids(tokenizer: Any, text: str) -> list[int]:
+    value = tokenizer.encode(text, add_special_tokens=False)
+    return list(value)
+
+
+def distribute_budget(lengths: list[int], budget: int) -> list[int]:
+    allocations = [0] * len(lengths)
+    remaining = {index for index, length in enumerate(lengths) if length > 0}
+    remaining_budget = max(0, budget)
+    while remaining and remaining_budget > 0:
+        share = max(1, remaining_budget // len(remaining))
+        completed = [
+            index for index in remaining if lengths[index] <= share
+        ]
+        if completed:
+            for index in completed:
+                allocations[index] = lengths[index]
+                remaining_budget -= lengths[index]
+                remaining.remove(index)
+            continue
+        ordered = sorted(remaining)
+        base, extra = divmod(remaining_budget, len(ordered))
+        for position, index in enumerate(ordered):
+            allocations[index] = base + int(position < extra)
+        break
+    return allocations
+
+
+def weighted_category_budgets(
+    lengths: dict[str, int], budget: int
+) -> dict[str, int]:
+    allocations = {name: 0 for name in lengths}
+    remaining = {name for name, length in lengths.items() if length > 0}
+    remaining_budget = max(0, budget)
+    while remaining and remaining_budget > 0:
+        total_weight = sum(STRUCTURED_FIELD_WEIGHTS[name] for name in remaining)
+        targets = {
+            name: max(
+                1,
+                remaining_budget * STRUCTURED_FIELD_WEIGHTS[name] // total_weight,
+            )
+            for name in remaining
+        }
+        completed = [name for name in remaining if lengths[name] <= targets[name]]
+        if completed:
+            for name in completed:
+                allocations[name] = lengths[name]
+                remaining_budget -= lengths[name]
+                remaining.remove(name)
+            continue
+        ordered = sorted(remaining)
+        assigned = 0
+        for position, name in enumerate(ordered):
+            if position == len(ordered) - 1:
+                amount = remaining_budget - assigned
+            else:
+                amount = (
+                    remaining_budget
+                    * STRUCTURED_FIELD_WEIGHTS[name]
+                    // total_weight
+                )
+                assigned += amount
+            allocations[name] = amount
+        break
+    return allocations
+
+
+def truncate_head_tail(tokenizer: Any, text: str, limit: int) -> str:
+    ids = tokenizer_ids(tokenizer, text)
+    if len(ids) <= limit:
+        return text
+    if limit <= 0:
+        return ""
+    marker = "[中间省略]"
+    marker_ids = tokenizer_ids(tokenizer, marker)
+    if limit <= len(marker_ids) + 2:
+        return tokenizer.decode(ids[:limit], skip_special_tokens=True).strip()
+    content_limit = limit - len(marker_ids)
+    head = max(1, content_limit // 3)
+    tail = content_limit - head
+    return (
+        tokenizer.decode(ids[:head], skip_special_tokens=True).strip()
+        + marker
+        + tokenizer.decode(ids[-tail:], skip_special_tokens=True).strip()
+    )
+
+
+def fit_segments(tokenizer: Any, segments: list[str], budget: int) -> list[str]:
+    nonempty = [text.strip() for text in segments if text.strip()]
+    lengths = [len(tokenizer_ids(tokenizer, text)) for text in nonempty]
+    allocations = distribute_budget(lengths, budget)
+    return [
+        truncate_head_tail(tokenizer, text, limit)
+        for text, limit in zip(nonempty, allocations)
+        if limit > 0
+    ]
+
+
+def structured_question_fields(question: dict[str, Any]) -> tuple[dict[str, list[str]], bool]:
+    sub_questions = question.get("sub_questions") or []
+    root_stem = as_text(question.get("stem"))
+    embedded_split = False
+    if sub_questions:
+        public_material = [root_stem] if root_stem else []
+        stems = [as_text(item.get("stem")) for item in sub_questions]
+    else:
+        public, stems, embedded_split = split_embedded_questions(root_stem)
+        public_material = [public] if public else []
+
+    records = [question, *sub_questions]
+    image_descriptions = [
+        as_text(record.get("image_description")) for record in records
+    ]
+    public_material.extend(text for text in image_descriptions if text)
+    return (
+        {
+            "public_material": public_material,
+            "stems": stems,
+            "answers": [as_text(record.get("answer")) for record in records],
+            "analyses": [
+                text
+                for record in records
+                for text in (
+                    as_text(record.get("analysis")),
+                    as_text(record.get("explanation")),
+                )
+            ],
+            "options": [as_text(record.get("options")) for record in records],
+        },
+        embedded_split,
+    )
+
+
+def structured_bge_query_text(
+    question: dict[str, Any],
+    tokenizer: Any,
+    instruction: str,
+    max_seq_length: int,
+) -> tuple[str, dict[str, Any]]:
+    fields, embedded_split = structured_question_fields(question)
+    original_query = question_query_text(question)
+    original_tokens = len(
+        tokenizer(
+            f"{instruction}{original_query}",
+            add_special_tokens=True,
+            truncation=False,
+        )["input_ids"]
+    )
+    instruction_tokens = len(tokenizer_ids(tokenizer, instruction))
+    special_tokens = int(tokenizer.num_special_tokens_to_add(pair=False))
+    available = max(1, max_seq_length - instruction_tokens - special_tokens)
+    titles = {
+        "public_material": "公共材料",
+        "stems": "题目要求",
+        "answers": "答案",
+        "analyses": "解析",
+        "options": "选项",
+    }
+
+    def build(content_budget: int) -> str:
+        lengths = {
+            name: sum(len(tokenizer_ids(tokenizer, text)) for text in values if text)
+            for name, values in fields.items()
+        }
+        category_budgets = weighted_category_budgets(lengths, content_budget)
+        sections: list[str] = []
+        for name in STRUCTURED_FIELD_WEIGHTS:
+            snippets = fit_segments(
+                tokenizer,
+                fields[name],
+                category_budgets[name],
+            )
+            if snippets:
+                sections.append(
+                    f"{titles[name]}：" + "\n".join(snippets)
+                )
+        return "\n".join(sections)
+
+    content_budget = max(1, available - 24)
+    text = build(content_budget)
+    structured_tokens = len(
+        tokenizer(
+            f"{instruction}{text}",
+            add_special_tokens=True,
+            truncation=False,
+        )["input_ids"]
+    )
+    while structured_tokens > max_seq_length and content_budget > 1:
+        content_budget = max(1, content_budget - (structured_tokens - max_seq_length) - 2)
+        text = build(content_budget)
+        structured_tokens = len(
+            tokenizer(
+                f"{instruction}{text}",
+                add_special_tokens=True,
+                truncation=False,
+            )["input_ids"]
+        )
+    return text, {
+        "original_token_count": original_tokens,
+        "structured_token_count": structured_tokens,
+        "original_would_truncate": original_tokens > max_seq_length,
+        "embedded_question_split": embedded_split,
+    }
 
 
 def question_region_exact_text(question: dict[str, Any]) -> str:
@@ -348,6 +583,45 @@ def encode_queries(
         convert_to_numpy=True,
         normalize_embeddings=True,
     )
+
+
+def encode_structured_queries(
+    questions: list[dict[str, Any]],
+    model_name_or_path: str,
+    instruction: str,
+    batch_size: int,
+    device: str | None,
+) -> tuple[Any, list[str], list[dict[str, Any]]]:
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError as error:
+        raise RuntimeError(
+            "缺少sentence-transformers，请安装项目的retrieval可选依赖"
+        ) from error
+
+    arguments: dict[str, Any] = {}
+    if device:
+        arguments["device"] = device
+    model = SentenceTransformer(model_name_or_path, **arguments)
+    texts: list[str] = []
+    diagnostics: list[dict[str, Any]] = []
+    for question in questions:
+        text, diagnostic = structured_bge_query_text(
+            question,
+            model.tokenizer,
+            instruction,
+            int(model.max_seq_length),
+        )
+        texts.append(text)
+        diagnostics.append(diagnostic)
+    embeddings = model.encode(
+        [f"{instruction}{text}" for text in texts],
+        batch_size=batch_size,
+        show_progress_bar=True,
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+    )
+    return embeddings, texts, diagnostics
 
 
 def ranked_candidates(
@@ -638,7 +912,12 @@ def run_retrieval(
     agreement_weight: float = 0.25,
     region_bm25_min_score: float = 0.0,
     region_bge_min_score: float = 0.4,
+    bge_query_mode: str = "current",
     query_encoder: Callable[[list[str], str, str, int, str | None], Any] = encode_queries,
+    structured_query_encoder: Callable[
+        [list[dict[str, Any]], str, str, int, str | None],
+        tuple[Any, list[str], list[dict[str, Any]]],
+    ] = encode_structured_queries,
 ) -> dict[str, Any]:
     if (
         nonregion_candidate_limit <= 0
@@ -648,6 +927,8 @@ def run_retrieval(
         raise ValueError("候选数量限制必须大于0")
     if not 0 <= agreement_weight < 1:
         raise ValueError("agreement_weight必须大于等于0且小于1")
+    if bge_query_mode not in BGE_QUERY_MODES:
+        raise ValueError(f"bge_query_mode必须是{BGE_QUERY_MODES}之一")
     manifest, labels, bm25, label_embeddings = load_index(index_dir)
     region_manifest: dict[str, Any] | None = None
     region_labels: list[dict[str, Any]]
@@ -664,9 +945,28 @@ def run_retrieval(
 
     model_name = embedding_model or manifest["embedding"]["model"]
     instruction = manifest["embedding"].get("query_instruction", "")
-    query_embeddings = query_encoder(
-        query_texts, model_name, instruction, batch_size, device
-    )
+    structured_texts: list[str] | None = None
+    structured_diagnostics: list[dict[str, Any]] | None = None
+    if bge_query_mode == "structured-limit":
+        (
+            query_embeddings,
+            structured_texts,
+            structured_diagnostics,
+        ) = structured_query_encoder(
+            questions,
+            model_name,
+            instruction,
+            batch_size,
+            device,
+        )
+        region_base_query_embeddings = query_encoder(
+            query_texts, model_name, instruction, batch_size, device
+        )
+    else:
+        query_embeddings = query_encoder(
+            query_texts, model_name, instruction, batch_size, device
+        )
+        region_base_query_embeddings = query_embeddings
     if query_embeddings.shape[0] != len(questions):
         raise ValueError("题目向量数量与输入题目数量不一致")
 
@@ -699,7 +999,7 @@ def run_retrieval(
         region_bm25 = bm25
         region_embeddings = label_embeddings
         region_indices = global_region_indices
-        region_query_embeddings = query_embeddings
+        region_query_embeddings = region_base_query_embeddings
     else:
         (
             region_manifest,
@@ -726,7 +1026,7 @@ def run_retrieval(
             "query_instruction", ""
         )
         if region_model == model_name and region_instruction == instruction:
-            region_query_embeddings = query_embeddings
+            region_query_embeddings = region_base_query_embeddings
         else:
             region_query_embeddings = query_encoder(
                 query_texts,
@@ -969,6 +1269,8 @@ def run_retrieval(
                 ],
                 "candidate_count": len(combined),
             }
+            if structured_diagnostics is not None and structured_texts is not None:
+                result["bge_query_diagnostics"] = structured_diagnostics[index]
             output.write(json.dumps(result, ensure_ascii=False) + "\n")
 
     summary = {
@@ -992,6 +1294,7 @@ def run_retrieval(
         "region_bm25_min_score": region_bm25_min_score,
         "region_bge_min_score": region_bge_min_score,
         "embedding_model": model_name,
+        "bge_query_mode": bge_query_mode,
         "metrics": {name: finalize_metrics(value) for name, value in metrics.items()},
         "nonregional_candidate_count": {
             "average": round(sum(fused_counts) / len(fused_counts), 6)
@@ -1025,6 +1328,22 @@ def run_retrieval(
         },
         "unknown_gold_label_counts": unknown_gold_labels,
     }
+    if structured_diagnostics is not None:
+        summary["structured_bge_queries"] = {
+            "originally_over_limit": sum(
+                bool(item["original_would_truncate"])
+                for item in structured_diagnostics
+            ),
+            "embedded_questions_split": sum(
+                bool(item["embedded_question_split"])
+                for item in structured_diagnostics
+            ),
+            "maximum_structured_tokens": max(
+                item["structured_token_count"] for item in structured_diagnostics
+            )
+            if structured_diagnostics
+            else None,
+        }
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -1050,6 +1369,11 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--device")
     parser.add_argument("--embedding-model")
+    parser.add_argument(
+        "--bge-query-mode",
+        choices=BGE_QUERY_MODES,
+        default="current",
+    )
     args = parser.parse_args()
 
     if args.batch_size <= 0:
@@ -1069,6 +1393,7 @@ def main() -> None:
         agreement_weight=args.agreement_weight,
         region_bm25_min_score=args.region_bm25_min_score,
         region_bge_min_score=args.region_bge_min_score,
+        bge_query_mode=args.bge_query_mode,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
