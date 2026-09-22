@@ -244,7 +244,7 @@ def test_region_exact_text_includes_analysis_but_excludes_options():
     assert "A.非洲 B.北美洲" not in text
 
 
-def test_analysis_place_is_primary_region_evidence():
+def test_analysis_place_is_auxiliary_region_evidence():
     question = {
         "stem": "读图回答",
         "analysis": "图示区域为英国",
@@ -252,11 +252,31 @@ def test_analysis_place_is_primary_region_evidence():
     }
     primary, weak = question_region_evidence_texts(question)
 
-    assert "英国" in primary
-    assert weak == ""
+    assert primary == "读图回答"
+    assert weak == "图示区域为英国"
 
 
-def test_region_admission_uses_single_place_only_with_strong_bge_support():
+def test_region_dense_text_uses_root_and_subquestion_stems_only():
+    question = {
+        "stem": "云南省东南部材料",
+        "analysis": "根题长解析",
+        "sub_questions": [
+            {
+                "stem": "分析哈尼梯田布局",
+                "options": "A.云贵高原",
+                "analysis": "小题长解析",
+            }
+        ],
+    }
+
+    text = question_region_dense_text(question)
+
+    assert text == "云南省东南部材料\n分析哈尼梯田布局"
+    assert "云贵高原" not in text
+    assert "长解析" not in text
+
+
+def test_region_admission_accepts_representative_place_with_either_route():
     labels = [
         {
             "label_path": "知识点@中国地理@中国地理微区域@黄淮海平原",
@@ -288,7 +308,7 @@ def test_region_admission_uses_single_place_only_with_strong_bge_support():
         evidence,
     )
     assert labels[0]["label_path"] in admitted
-    assert labels[1]["label_path"] not in admitted
+    assert labels[1]["label_path"] in admitted
 
 
 def test_region_admission_keeps_top_five_bge_as_semantic_fallback():
@@ -299,6 +319,25 @@ def test_region_admission_keeps_top_five_bge_as_semantic_fallback():
         [],
     )
     assert admitted == {label}
+
+
+def test_region_admission_keeps_top_five_bm25_and_dual_top_twenty():
+    bm25_only = "知识点@世界地理@世界主要的大洲@亚洲概况"
+    dual_route = "知识点@世界地理@世界重要的地区@中亚"
+    rejected = "知识点@世界地理@世界重要的地区@北欧"
+    admitted = admitted_region_label_paths(
+        [
+            {"rank": 2, "label_path": bm25_only, "score": 3.0},
+            {"rank": 12, "label_path": dual_route, "score": 1.0},
+            {"rank": 11, "label_path": rejected, "score": 1.1},
+        ],
+        [
+            {"rank": 18, "label_path": dual_route, "score": 0.5},
+        ],
+        [],
+    )
+
+    assert admitted == {bm25_only, dual_route}
 
 
 def test_region_phrase_bm25_does_not_match_character_fragments():
@@ -409,6 +448,61 @@ def test_fusion_keeps_strong_single_route_above_two_weak_routes():
 
 
 def test_nonregion_combination_keeps_bm25_primary_and_adds_new_bge_labels():
+    bm25 = [
+        {"rank": rank, "label_path": f"label-{rank}", "score": 1.0 / rank}
+        for rank in range(1, 31)
+    ]
+    bge = [
+        {
+            "rank": rank,
+            "label_path": f"label-{rank + 15}",
+            "score": 1.0 / rank,
+        }
+        for rank in range(1, 31)
+    ]
+    final, supplements = combine_nonregion_candidates(
+        bm25,
+        bge,
+        limit=30,
+    )
+
+    assert len(final) == 30
+    assert [item["label_path"] for item in final[:21]] == [
+        f"label-{rank}" for rank in range(1, 22)
+    ]
+    assert [item["label_path"] for item in supplements] == [
+        f"label-{rank}" for rank in range(22, 31)
+    ]
+    assert all(
+        item["selection_source"] == "bge_supplement"
+        for item in supplements
+    )
+
+
+def test_region_ranking_does_not_put_analysis_place_before_top_bge():
+    semantic = "语义强候选"
+    analysis_place = "解析地点"
+    result = rank_region_candidates(
+        [{"rank": 8, "label_path": analysis_place, "score": 0.5}],
+        [{"rank": 1, "label_path": semantic, "score": 0.8}],
+        [
+            {
+                "label_path": analysis_place,
+                "direct_names": [],
+                "contained_places": [],
+                "representative_places": [],
+                "weak_direct_names": ["解析地点"],
+                "weak_contained_places": [],
+                "weak_representative_places": [],
+            }
+        ],
+        limit=2,
+    )
+
+    assert [item["label_path"] for item in result] == [semantic, analysis_place]
+
+
+def test_nonregion_combination_is_direct_quota_union():
     bm25 = [
         {"rank": rank, "label_path": f"label-{rank}", "score": 1.0 / rank}
         for rank in range(1, 31)
