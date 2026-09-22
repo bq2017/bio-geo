@@ -30,6 +30,7 @@ label-retrieval-texts = "bio_geo_tagging.build_retrieval_texts:main"
 region-retrieval-texts = "bio_geo_tagging.build_region_retrieval_texts:main"
 label-retrieval-index = "bio_geo_tagging.build_retrieval_index:main"
 question-hybrid-retrieval = "bio_geo_tagging.hybrid_candidate_retrieval:main"
+question-bge-length-diagnosis = "bio_geo_tagging.bge_length_diagnosis:main"
 question-image-urls = "bio_geo_tagging.attach_question_images:main"
 
 [project.optional-dependencies]

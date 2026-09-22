@@ -35,9 +35,7 @@ WORLD_REGION_BRANCHES = {
     "世界地理微区域",
 }
 NONREGION_DIAGNOSTIC_LIMIT = 50
-NONREGION_BM25_QUOTA = 12
-NONREGION_BGE_QUOTA = 23
-NONREGION_FUSED_QUOTA = 25
+NONREGION_BM25_PRIMARY_QUOTA = 21
 REGION_DIAGNOSTIC_LIMIT = 20
 REGION_REPRESENTATIVE_BGE_MAX_RANK = 10
 REGION_BGE_ONLY_MAX_RANK = 5
@@ -524,23 +522,42 @@ def rank_region_candidates(
 def combine_nonregion_candidates(
     bm25_candidates: list[dict[str, Any]],
     bge_candidates: list[dict[str, Any]],
-    agreement_weight: float,
     limit: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    quota_candidates = rank_fused_candidates(
-        {
-            "bm25": bm25_candidates[:NONREGION_BM25_QUOTA],
-            "bge": bge_candidates[:NONREGION_BGE_QUOTA],
-        },
-        agreement_weight=agreement_weight,
-    )
-    fused_candidates = rank_fused_candidates(
-        {"bm25": bm25_candidates, "bge": bge_candidates},
-        agreement_weight=agreement_weight,
-        limit=NONREGION_FUSED_QUOTA,
-    )
-    combined = merge_candidate_lists(quota_candidates, fused_candidates)
-    return combined[:limit], fused_candidates
+    bm25_by_label = {item["label_path"]: item for item in bm25_candidates}
+    bge_by_label = {item["label_path"]: item for item in bge_candidates}
+
+    def selected(label: str, source: str) -> dict[str, Any]:
+        item: dict[str, Any] = {
+            "label_path": label,
+            "selection_source": source,
+        }
+        bm25 = bm25_by_label.get(label)
+        if bm25 is not None:
+            item["bm25_rank"] = bm25["rank"]
+            item["bm25_raw_score"] = bm25["score"]
+        bge = bge_by_label.get(label)
+        if bge is not None:
+            item["bge_rank"] = bge["rank"]
+            item["bge_raw_score"] = bge["score"]
+        return item
+
+    primary_limit = min(NONREGION_BM25_PRIMARY_QUOTA, limit)
+    primary = [
+        selected(item["label_path"], "bm25_primary")
+        for item in bm25_candidates[:primary_limit]
+    ]
+    seen = {item["label_path"] for item in primary}
+    supplements: list[dict[str, Any]] = []
+    for item in bge_candidates:
+        if len(primary) + len(supplements) >= limit:
+            break
+        label = item["label_path"]
+        if label in seen:
+            continue
+        supplements.append(selected(label, "bge_supplement"))
+        seen.add(label)
+    return primary + supplements, supplements
 
 
 def combine_comprehensive_candidates(
@@ -757,10 +774,9 @@ def run_retrieval(
                 dense_scores,
                 labels,
             )
-            nonregional_final, nonregional_fused = combine_nonregion_candidates(
+            nonregional_final, nonregional_supplements = combine_nonregion_candidates(
                 sparse,
                 dense,
-                agreement_weight,
                 nonregion_candidate_limit,
             )
             comprehensive_sparse = ranked_candidates(
@@ -902,7 +918,7 @@ def run_retrieval(
                 ],
                 "bm25_candidates": sparse[:NONREGION_DIAGNOSTIC_LIMIT],
                 "bge_candidates": dense[:NONREGION_DIAGNOSTIC_LIMIT],
-                "nonregional_fused_top_candidates": nonregional_fused,
+                "nonregional_bge_supplement_candidates": nonregional_supplements,
                 "nonregional_final_candidates": nonregional_final,
                 "nonregional_final_missing_labels": [
                     label
@@ -960,9 +976,8 @@ def run_retrieval(
         "label_count": len(labels),
         "nonregional_label_count": len(nonregion_indices),
         "strict_comprehensive_label_count": len(strict_comprehensive_indices),
-        "nonregion_bm25_quota": NONREGION_BM25_QUOTA,
-        "nonregion_bge_quota": NONREGION_BGE_QUOTA,
-        "nonregion_fused_quota": NONREGION_FUSED_QUOTA,
+        "nonregion_primary_route": "bm25",
+        "nonregion_bm25_primary_quota": NONREGION_BM25_PRIMARY_QUOTA,
         "nonregion_candidate_limit": nonregion_candidate_limit,
         "regional_label_count": len(region_indices),
         "regional_index": str(region_index_dir) if region_index_dir else None,
@@ -1026,7 +1041,7 @@ def main() -> None:
     parser.add_argument("--region-index-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--summary-output", type=Path, required=True)
-    parser.add_argument("--nonregion-candidate-limit", type=int, default=35)
+    parser.add_argument("--nonregion-candidate-limit", type=int, default=30)
     parser.add_argument("--region-candidate-limit", type=int, default=5)
     parser.add_argument("--comprehensive-candidate-limit", type=int, default=3)
     parser.add_argument("--agreement-weight", type=float, default=0.25)
