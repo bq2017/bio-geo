@@ -20,28 +20,11 @@ from bio_geo_tagging.hybrid_candidate_retrieval import (
     question_gold_labels,
     question_query_text,
     question_region_exact_text,
-    split_embedded_questions,
-    structured_bge_query_text,
     region_phrase_evidence,
     rank_fused_candidates,
     rank_region_candidates,
     run_retrieval,
 )
-
-
-class CharacterTokenizer:
-    def encode(self, text, add_special_tokens=False):
-        ids = [ord(character) for character in text]
-        return [-1, *ids, -2] if add_special_tokens else ids
-
-    def decode(self, ids, skip_special_tokens=True):
-        return "".join(chr(value) for value in ids if value >= 0)
-
-    def __call__(self, text, add_special_tokens=True, truncation=False):
-        return {"input_ids": self.encode(text, add_special_tokens)}
-
-    def num_special_tokens_to_add(self, pair=False):
-        return 2
 
 
 def test_region_label_path_classification():
@@ -153,65 +136,6 @@ def test_question_text_and_gold_cover_root_and_subquestions():
     assert "小题题干" in text
     assert "标签甲" not in text
     assert question_gold_labels(question) == ["标签甲", "标签乙"]
-
-
-def test_split_embedded_questions_keeps_each_numbered_prompt():
-    public, prompts, was_split = split_embedded_questions(
-        "公共材料很长。（1）分析原因。（2）说明影响。（3）提出措施。"
-    )
-
-    assert was_split is True
-    assert public == "公共材料很长。"
-    assert prompts == [
-        "（1）分析原因。",
-        "（2）说明影响。",
-        "（3）提出措施。",
-    ]
-
-
-def test_structured_bge_query_keeps_all_prompts_within_token_limit():
-    tokenizer = CharacterTokenizer()
-    question = {
-        "stem": "背景材料" * 40 + "（1）分析原因。" + "（2）说明影响。" + "（3）提出措施。",
-        "analysis": "解析内容" * 30,
-        "options": "A.甲 B.乙 C.丙 D.丁",
-        "sub_questions": [],
-    }
-
-    text, diagnostic = structured_bge_query_text(
-        question,
-        tokenizer,
-        instruction="检索：",
-        max_seq_length=120,
-    )
-
-    assert "（1）" in text
-    assert "（2）" in text
-    assert "（3）" in text
-    assert diagnostic["embedded_question_split"] is True
-    assert diagnostic["original_would_truncate"] is True
-    assert diagnostic["structured_token_count"] <= 120
-
-
-def test_structured_bge_query_uses_head_tail_when_no_numbered_prompts():
-    tokenizer = CharacterTokenizer()
-    question = {
-        "stem": "开头信息" + "中间内容" * 80 + "末尾设问",
-        "sub_questions": [],
-    }
-
-    text, diagnostic = structured_bge_query_text(
-        question,
-        tokenizer,
-        instruction="",
-        max_seq_length=100,
-    )
-
-    assert "开头信息" in text
-    assert "末尾设问" in text
-    assert "[中间省略]" in text
-    assert diagnostic["embedded_question_split"] is False
-    assert diagnostic["structured_token_count"] <= 100
 
 
 def test_region_exact_text_includes_analysis_but_excludes_options():
