@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+from collections import Counter
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -17,6 +19,10 @@ QUESTION_TEXT_FIELDS = (
     "analysis",
     "explanation",
     "image_description",
+)
+OPTION_RE = re.compile(
+    r"(?:^|\n)\s*([A-H])\s*[.．、:：]\s*(.*?)(?=(?:\n\s*[A-H]\s*[.．、:：])|\Z)",
+    re.DOTALL | re.IGNORECASE,
 )
 
 REGION_EXACT_TEXT_FIELDS = (
@@ -99,6 +105,55 @@ def question_query_text(question: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def answer_text(record: dict[str, Any]) -> str:
+    answer = as_text(record.get("answer"))
+    options = as_text(record.get("options"))
+    if not answer or not options:
+        return answer
+    normalized_answer = answer.upper()
+    if not re.fullmatch(r"[A-H\s,，、;；/]+", normalized_answer):
+        return answer
+    option_map = {
+        key.upper(): text.strip()
+        for key, text in OPTION_RE.findall(options)
+        if text.strip()
+    }
+    keys = re.findall(r"[A-H]", normalized_answer)
+    resolved = [option_map[key] for key in keys if key in option_map]
+    return " ".join(resolved) if len(resolved) == len(keys) else answer
+
+
+def question_bm25_query_text(question: dict[str, Any]) -> str:
+    parts: list[str] = []
+
+    def append(text: str, weight: int) -> None:
+        if text:
+            parts.extend([text] * weight)
+
+    def append_target(record: dict[str, Any]) -> None:
+        append(as_text(record.get("stem")), 2)
+        append(answer_text(record), 2)
+        append(
+            as_text(record.get("analysis"))
+            or as_text(record.get("explanation")),
+            2,
+        )
+        append(as_text(record.get("options")), 1)
+
+    sub_questions = question.get("sub_questions") or []
+    if not isinstance(sub_questions, list) or not all(
+        isinstance(item, dict) for item in sub_questions
+    ):
+        raise ValueError("sub_questions必须是对象数组")
+    if sub_questions:
+        append(as_text(question.get("stem")), 1)
+        for sub_question in sub_questions:
+            append_target(sub_question)
+    else:
+        append_target(question)
+    return "\n".join(parts)
+
+
 def question_region_exact_text(question: dict[str, Any]) -> str:
     """Return fields where a place-name occurrence can support regional retrieval."""
     parts: list[str] = []
@@ -175,11 +230,15 @@ def bm25_scores(query: str, index: dict[str, Any]) -> list[float]:
     scores = [0.0] * int(index["document_count"])
     tokenizer = index.get("tokenizer")
     if tokenizer == "unicode_char_ngram":
-        terms = set(tokenize_char_ngrams(query, tuple(index["ngram_sizes"])))
+        term_weights = Counter(
+            tokenize_char_ngrams(query, tuple(index["ngram_sizes"]))
+        )
     elif tokenizer == "region_phrase":
         normalized_query = normalize_phrase(query)
-        terms = {
-            phrase for phrase in index["idf"] if phrase in normalized_query
+        term_weights = {
+            phrase: 1.0
+            for phrase in index["idf"]
+            if phrase in normalized_query
         }
     else:
         raise ValueError(f"不支持的BM25分词器：{tokenizer}")
@@ -187,7 +246,7 @@ def bm25_scores(query: str, index: dict[str, Any]) -> list[float]:
     b = float(index["b"])
     average_length = float(index["average_document_length"])
     document_lengths = index["document_lengths"]
-    for term in terms:
+    for term, query_weight in term_weights.items():
         term_idf = index["idf"].get(term)
         if term_idf is None:
             continue
@@ -196,7 +255,11 @@ def bm25_scores(query: str, index: dict[str, Any]) -> list[float]:
                 1 - b + b * document_lengths[document_index] / average_length
             )
             scores[document_index] += (
-                float(term_idf) * frequency * (k1 + 1) / denominator
+                float(term_idf)
+                * frequency
+                * (k1 + 1)
+                / denominator
+                * query_weight
             )
     return scores
 
@@ -655,12 +718,14 @@ def run_retrieval(
     region_embeddings: Any
     questions: list[dict[str, Any]] = []
     query_texts: list[str] = []
+    bm25_query_texts: list[str] = []
     for line_number, question in read_jsonl(input_path):
         query = question_query_text(question)
         if not query:
             raise ValueError(f"题目文件第{line_number}行没有可用于检索的文本")
         questions.append(question)
         query_texts.append(query)
+        bm25_query_texts.append(question_bm25_query_text(question))
 
     model_name = embedding_model or manifest["embedding"]["model"]
     instruction = manifest["embedding"].get("query_instruction", "")
@@ -753,8 +818,11 @@ def run_retrieval(
     combined_counts: list[int] = []
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8", newline="\n") as output:
-        for index, (question, query) in enumerate(zip(questions, query_texts)):
-            sparse_scores = bm25_scores(query, bm25)
+        for index, (question, query, bm25_query) in enumerate(
+            zip(questions, query_texts, bm25_query_texts)
+        ):
+            sparse_scores = bm25_scores(bm25_query, bm25)
+            unweighted_sparse_scores = bm25_scores(query, bm25)
             dense_scores = label_embeddings @ query_embeddings[index]
             sparse = ranked_candidates(
                 top_indices_from_pool(
@@ -781,11 +849,11 @@ def run_retrieval(
             )
             comprehensive_sparse = ranked_candidates(
                 top_indices_from_pool(
-                    sparse_scores,
+                    unweighted_sparse_scores,
                     strict_comprehensive_indices,
                     len(strict_comprehensive_indices),
                 ),
-                sparse_scores,
+                unweighted_sparse_scores,
                 labels,
             )
             comprehensive_dense = ranked_candidates(
