@@ -75,17 +75,16 @@ def test_comprehensive_candidates_have_an_independent_limit():
     selected = combine_comprehensive_candidates(
         bm25,
         bge,
-        agreement_weight=0.25,
         limit=3,
     )
 
     assert len(selected) == 3
-    assert {item["label_path"] for item in selected} <= {
+    assert [item["label_path"] for item in selected] == [
+        "综合丁",
         "综合甲",
         "综合乙",
-        "综合丙",
-        "综合丁",
-    }
+    ]
+    assert selected[0]["bge_rrf_score"] > selected[0]["bm25_rrf_score"]
 
 
 def test_exact_region_candidates_uses_leaf_name():
@@ -563,19 +562,3 @@ def test_irrelevant_region_candidates_are_not_forced_into_final_results(tmp_path
     )
     result = json.loads(output_path.read_text(encoding="utf-8"))
     assert result["regional_final_candidates"] == []
-
-
-def test_retrieval_rejects_invalid_agreement_weight(tmp_path):
-    with pytest.raises(ValueError, match="agreement_weight"):
-        run_retrieval(
-            input_path=tmp_path / "unused.jsonl",
-            index_dir=tmp_path / "unused-index",
-            output_path=tmp_path / "unused-output.jsonl",
-            summary_path=tmp_path / "unused-summary.json",
-            nonregion_candidate_limit=25,
-            region_candidate_limit=5,
-            agreement_weight=1.0,
-            batch_size=8,
-            device="cpu",
-            embedding_model=None,
-        )

@@ -36,6 +36,9 @@ WORLD_REGION_BRANCHES = {
 }
 NONREGION_DIAGNOSTIC_LIMIT = 50
 NONREGION_BM25_PRIMARY_QUOTA = 21
+COMPREHENSIVE_RRF_K = 60
+COMPREHENSIVE_BM25_WEIGHT = 0.25
+COMPREHENSIVE_BGE_WEIGHT = 0.75
 REGION_DIAGNOSTIC_LIMIT = 20
 REGION_REPRESENTATIVE_BGE_MAX_RANK = 10
 REGION_BGE_ONLY_MAX_RANK = 5
@@ -563,15 +566,62 @@ def combine_nonregion_candidates(
 def combine_comprehensive_candidates(
     bm25_candidates: list[dict[str, Any]],
     bge_candidates: list[dict[str, Any]],
-    agreement_weight: float,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Rank only strict comprehensive labels and keep a small separate quota."""
-    return rank_fused_candidates(
-        {"bm25": bm25_candidates, "bge": bge_candidates},
-        agreement_weight=agreement_weight,
-        limit=limit,
+    """Rank strict comprehensive labels with weighted reciprocal rank fusion."""
+    by_label: dict[str, dict[str, Any]] = {}
+    for route, candidates in (
+        ("bm25", bm25_candidates),
+        ("bge", bge_candidates),
+    ):
+        for candidate in candidates:
+            item = by_label.setdefault(
+                candidate["label_path"],
+                {"label_path": candidate["label_path"]},
+            )
+            item[f"{route}_rank"] = candidate["rank"]
+            item[f"{route}_raw_score"] = candidate["score"]
+
+    for item in by_label.values():
+        bm25_rank = item.get("bm25_rank")
+        bge_rank = item.get("bge_rank")
+        bm25_rrf_score = (
+            COMPREHENSIVE_BM25_WEIGHT / (COMPREHENSIVE_RRF_K + bm25_rank)
+            if bm25_rank is not None
+            else 0.0
+        )
+        bge_rrf_score = (
+            COMPREHENSIVE_BGE_WEIGHT / (COMPREHENSIVE_RRF_K + bge_rank)
+            if bge_rank is not None
+            else 0.0
+        )
+        item["bm25_rrf_score"] = round(bm25_rrf_score, 10)
+        item["bge_rrf_score"] = round(bge_rrf_score, 10)
+        item["support_count"] = int(bm25_rank is not None) + int(
+            bge_rank is not None
+        )
+        item["fusion_score"] = round(
+            bm25_rrf_score + bge_rrf_score,
+            10,
+        )
+
+    missing_rank = len(bm25_candidates) + len(bge_candidates) + 1
+    ranked = sorted(
+        by_label.values(),
+        key=lambda item: (
+            -item["fusion_score"],
+            min(
+                item.get("bm25_rank", missing_rank),
+                item.get("bge_rank", missing_rank),
+            ),
+            max(
+                item.get("bm25_rank", missing_rank),
+                item.get("bge_rank", missing_rank),
+            ),
+            item["label_path"],
+        ),
     )
+    return ranked[:limit]
 
 
 def merge_candidate_lists(
@@ -633,9 +683,8 @@ def run_retrieval(
     batch_size: int,
     device: str | None,
     embedding_model: str | None,
-    comprehensive_candidate_limit: int = 3,
+    comprehensive_candidate_limit: int = 5,
     region_index_dir: Path | None = None,
-    agreement_weight: float = 0.25,
     region_bm25_min_score: float = 0.0,
     region_bge_min_score: float = 0.4,
     query_encoder: Callable[[list[str], str, str, int, str | None], Any] = encode_queries,
@@ -646,8 +695,6 @@ def run_retrieval(
         or comprehensive_candidate_limit <= 0
     ):
         raise ValueError("候选数量限制必须大于0")
-    if not 0 <= agreement_weight < 1:
-        raise ValueError("agreement_weight必须大于等于0且小于1")
     manifest, labels, bm25, label_embeddings = load_index(index_dir)
     region_manifest: dict[str, Any] | None = None
     region_labels: list[dict[str, Any]]
@@ -800,7 +847,6 @@ def run_retrieval(
             comprehensive_final = combine_comprehensive_candidates(
                 comprehensive_sparse,
                 comprehensive_dense,
-                agreement_weight,
                 comprehensive_candidate_limit,
             )
             regional_sparse_scores = (
@@ -988,7 +1034,12 @@ def run_retrieval(
             + region_candidate_limit
             + comprehensive_candidate_limit
         ),
-        "agreement_weight": agreement_weight,
+        "comprehensive_fusion": {
+            "method": "weighted_rrf",
+            "k": COMPREHENSIVE_RRF_K,
+            "bm25_weight": COMPREHENSIVE_BM25_WEIGHT,
+            "bge_weight": COMPREHENSIVE_BGE_WEIGHT,
+        },
         "region_bm25_min_score": region_bm25_min_score,
         "region_bge_min_score": region_bge_min_score,
         "embedding_model": model_name,
@@ -1043,8 +1094,7 @@ def main() -> None:
     parser.add_argument("--summary-output", type=Path, required=True)
     parser.add_argument("--nonregion-candidate-limit", type=int, default=30)
     parser.add_argument("--region-candidate-limit", type=int, default=5)
-    parser.add_argument("--comprehensive-candidate-limit", type=int, default=3)
-    parser.add_argument("--agreement-weight", type=float, default=0.25)
+    parser.add_argument("--comprehensive-candidate-limit", type=int, default=5)
     parser.add_argument("--region-bm25-min-score", type=float, default=0.0)
     parser.add_argument("--region-bge-min-score", type=float, default=0.4)
     parser.add_argument("--batch-size", type=int, default=16)
@@ -1066,7 +1116,6 @@ def main() -> None:
         batch_size=args.batch_size,
         device=args.device,
         embedding_model=args.embedding_model,
-        agreement_weight=args.agreement_weight,
         region_bm25_min_score=args.region_bm25_min_score,
         region_bge_min_score=args.region_bge_min_score,
     )
