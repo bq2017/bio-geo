@@ -193,8 +193,8 @@ PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication \
   --labels data/taxonomy/geography-existing-definitions.jsonl \
   --audited-exclusions configs/geography_adjudication_audited_exclusions.json \
   --run-dir runs/adjudication/geography-smoke-50 \
-  --endpoint http://172.22.0.35:9204/v1/chat/completions \
-  --model Qwen3.8-27B \
+  --endpoint http://172.22.0.35:9104/v1/chat/completions \
+  --model DeepSeek-V4-Flash \
   --disable-thinking \
   --limit 50 \
   --workers 10 \
