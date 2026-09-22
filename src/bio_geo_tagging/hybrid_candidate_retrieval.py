@@ -22,10 +22,9 @@ QUESTION_TEXT_FIELDS = (
 REGION_EXACT_TEXT_FIELDS = (
     "stem",
     "answer",
-    "analysis",
-    "explanation",
     "image_description",
 )
+REGION_WEAK_TEXT_FIELDS = ("analysis", "explanation")
 
 CHINA_REGION_BRANCHES = {"中国地理分区", "中国地理微区域"}
 WORLD_REGION_BRANCHES = {
@@ -43,6 +42,7 @@ REGION_DIAGNOSTIC_LIMIT = 20
 REGION_REPRESENTATIVE_BGE_MAX_RANK = 10
 REGION_BGE_ONLY_MAX_RANK = 5
 COMPREHENSIVE_DIAGNOSTIC_LIMIT = 20
+PLACE_NAME_CONTINUATION_SUFFIXES = ("洋",)
 
 # These labels contain “综合” in the leaf name, but describe a concrete topic or
 # question type rather than an umbrella label. They stay in the original V3 pool.
@@ -103,19 +103,30 @@ def question_query_text(question: dict[str, Any]) -> str:
 
 
 def question_region_exact_text(question: dict[str, Any]) -> str:
-    """Return fields where a place-name occurrence can support regional retrieval."""
+    """Return region-bearing text used by the regional sparse retriever."""
+    primary_text, weak_text = question_region_evidence_texts(question)
+    return "\n".join(text for text in (primary_text, weak_text) if text)
+
+
+def question_region_evidence_texts(question: dict[str, Any]) -> tuple[str, str]:
+    """Separate primary place evidence from place names mentioned in analysis."""
     parts: list[str] = []
+    weak_parts: list[str] = []
 
     def append_fields(record: dict[str, Any]) -> None:
         for field in REGION_EXACT_TEXT_FIELDS:
             text = as_text(record.get(field))
             if text:
                 parts.append(text)
+        for field in REGION_WEAK_TEXT_FIELDS:
+            text = as_text(record.get(field))
+            if text:
+                weak_parts.append(text)
 
     append_fields(question)
     for sub_question in question.get("sub_questions") or []:
         append_fields(sub_question)
-    return "\n".join(parts)
+    return "\n".join(parts), "\n".join(weak_parts)
 
 
 def question_gold_labels(question: dict[str, Any]) -> list[str]:
@@ -238,6 +249,16 @@ def exact_region_candidates(
     labels: list[dict[str, Any]],
     region_indices: list[int],
 ) -> list[dict[str, str]]:
+    phrases = {
+        name
+        for index in region_indices
+        for name in (
+            labels[index].get("exact_names")
+            or [labels[index]["label_path"].rsplit("@", 1)[-1]]
+        )
+        if name
+    }
+    matched_phrases = longest_place_name_matches(query, phrases)
     matches: list[dict[str, str]] = []
     for index in region_indices:
         label_path = labels[index]["label_path"]
@@ -247,7 +268,7 @@ def exact_region_candidates(
             (
                 name
                 for name in sorted(exact_names, key=len, reverse=True)
-                if name and name in query
+                if name in matched_phrases
             ),
             None,
         )
@@ -258,11 +279,48 @@ def exact_region_candidates(
     return matches
 
 
+def longest_place_name_matches(query: str, phrases: Iterable[str]) -> set[str]:
+    """Match complete place names and suppress shorter names inside longer ones."""
+    accepted_spans: list[tuple[int, int]] = []
+    matched: set[str] = set()
+    for phrase in sorted(set(phrases), key=lambda value: (-len(value), value)):
+        start = query.find(phrase)
+        while start >= 0:
+            end = start + len(phrase)
+            continues_as_longer_place_name = any(
+                query.startswith(suffix, end)
+                for suffix in PLACE_NAME_CONTINUATION_SUFFIXES
+            )
+            if not continues_as_longer_place_name and not any(
+                accepted_start <= start and end <= accepted_end
+                for accepted_start, accepted_end in accepted_spans
+            ):
+                accepted_spans.append((start, end))
+                matched.add(phrase)
+            start = query.find(phrase, start + 1)
+    return matched
+
+
 def region_phrase_evidence(
     query: str,
     labels: list[dict[str, Any]],
     region_indices: list[int],
+    weak_query: str = "",
 ) -> list[dict[str, Any]]:
+    phrases = {
+        name
+        for index in region_indices
+        for names in (
+            labels[index].get("exact_names")
+            or [labels[index]["label_path"].rsplit("@", 1)[-1]],
+            labels[index].get("contained_places") or [],
+            labels[index].get("representative_places") or [],
+        )
+        for name in names
+        if name
+    }
+    primary_matches = longest_place_name_matches(query, phrases)
+    weak_matches = longest_place_name_matches(weak_query, phrases)
     evidence: list[dict[str, Any]] = []
     for index in region_indices:
         label = labels[index]
@@ -273,16 +331,22 @@ def region_phrase_evidence(
             "contained_places": label.get("contained_places") or [],
             "representative_places": label.get("representative_places") or [],
         }
-        matched = {
+        primary = {
             field: list(
                 dict.fromkeys(
-                    name for name in names if name and name in query
+                    name for name in names if name in primary_matches
                 )
             )
             for field, names in fields.items()
         }
-        if any(matched.values()):
-            evidence.append({"label_path": label_path, **matched})
+        weak = {
+            f"weak_{field}": list(
+                dict.fromkeys(name for name in names if name in weak_matches)
+            )
+            for field, names in fields.items()
+        }
+        if any(primary.values()) or any(weak.values()):
+            evidence.append({"label_path": label_path, **primary, **weak})
     return evidence
 
 
@@ -306,6 +370,12 @@ def admitted_region_label_paths(
         has_direct_evidence = bool(item.get("direct_names"))
         has_contained_place = bool(item.get("contained_places"))
         has_representative_place = bool(item.get("representative_places"))
+        has_weak_direct_or_contained_place = bool(
+            item.get("weak_direct_names") or item.get("weak_contained_places")
+        )
+        has_weak_representative_place = bool(
+            item.get("weak_representative_places")
+        )
         bge_rank = bge_ranks.get(label_path)
         has_supported_representative_place = (
             has_representative_place
@@ -315,10 +385,20 @@ def admitted_region_label_paths(
         has_strong_bge_support = (
             bge_rank is not None and bge_rank <= REGION_BGE_ONLY_MAX_RANK
         )
+        has_supported_weak_place = (
+            has_weak_direct_or_contained_place
+            and bge_rank is not None
+            and bge_rank <= REGION_REPRESENTATIVE_BGE_MAX_RANK
+        ) or (
+            has_weak_representative_place
+            and bge_rank is not None
+            and bge_rank <= REGION_BGE_ONLY_MAX_RANK
+        )
         if (
             has_direct_evidence
             or has_contained_place
             or has_supported_representative_place
+            or has_supported_weak_place
             or has_strong_bge_support
         ):
             admitted.add(label_path)
@@ -494,8 +574,15 @@ def rank_region_candidates(
         elif evidence.get("representative_places"):
             evidence_tier = 3
             evidence_type = "representative_place_with_bge"
-        else:
+        elif (
+            evidence.get("weak_direct_names")
+            or evidence.get("weak_contained_places")
+            or evidence.get("weak_representative_places")
+        ):
             evidence_tier = 4
+            evidence_type = "analysis_place_with_bge"
+        else:
+            evidence_tier = 5
             evidence_type = "bge_fallback"
         ranked.append(
             {
@@ -505,6 +592,9 @@ def rank_region_candidates(
                 "matched_direct_names": evidence.get("direct_names") or [],
                 "matched_contained_places": evidence.get("contained_places") or [],
                 "matched_representative_places": evidence.get("representative_places") or [],
+                "matched_analysis_direct_names": evidence.get("weak_direct_names") or [],
+                "matched_analysis_contained_places": evidence.get("weak_contained_places") or [],
+                "matched_analysis_representative_places": evidence.get("weak_representative_places") or [],
                 "region_bm25_rank": bm25["rank"] if bm25 else None,
                 "region_bm25_raw_score": bm25["score"] if bm25 else None,
                 "region_bge_rank": bge["rank"] if bge else None,
@@ -887,15 +977,19 @@ def run_retrieval(
                 for item in regional_dense_full
                 if item["score"] >= region_bge_min_score
             ]
+            region_primary_text, region_weak_text = question_region_evidence_texts(
+                question
+            )
             regional_exact = exact_region_candidates(
-                question_region_exact_text(question),
+                region_primary_text,
                 region_labels,
                 region_indices,
             )
             regional_phrase_evidence = region_phrase_evidence(
-                question_region_exact_text(question),
+                region_primary_text,
                 region_labels,
                 region_indices,
+                weak_query=region_weak_text,
             )
             regional_fused = rank_region_candidates(
                 regional_sparse,

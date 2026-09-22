@@ -115,6 +115,88 @@ def test_exact_region_candidates_uses_aliases():
     ]
 
 
+def test_exact_region_candidates_does_not_match_short_name_inside_long_place_name():
+    labels = [
+        {"label_path": "知识点@世界地理@世界重要的国家@印度"},
+        {"label_path": "知识点@世界地理@世界重要的国家@印度尼西亚"},
+    ]
+
+    assert exact_region_candidates("印度尼西亚的雅加达", labels, [0, 1]) == [
+        {
+            "label_path": "知识点@世界地理@世界重要的国家@印度尼西亚",
+            "matched_name": "印度尼西亚",
+        }
+    ]
+
+
+def test_region_phrase_evidence_separates_primary_and_analysis_places():
+    labels = [
+        {
+            "label_path": "知识点@世界地理@世界重要的国家@印度",
+            "exact_names": ["印度"],
+        },
+        {
+            "label_path": "知识点@世界地理@世界重要的国家@印度尼西亚",
+            "exact_names": ["印度尼西亚"],
+        },
+        {
+            "label_path": "知识点@世界地理@世界重要的国家@加拿大",
+            "exact_names": ["加拿大"],
+        },
+    ]
+
+    evidence = region_phrase_evidence(
+        "印度尼西亚火山分布图",
+        labels,
+        [0, 1, 2],
+        weak_query="与同纬度加拿大相比",
+    )
+    by_label = {item["label_path"]: item for item in evidence}
+
+    assert labels[0]["label_path"] not in by_label
+    assert by_label[labels[1]["label_path"]]["direct_names"] == ["印度尼西亚"]
+    assert by_label[labels[2]["label_path"]]["direct_names"] == []
+    assert by_label[labels[2]["label_path"]]["weak_direct_names"] == ["加拿大"]
+
+
+@pytest.mark.parametrize(
+    ("query", "long_place"),
+    [
+        ("印度尼西亚火山分布", "印度尼西亚"),
+        ("西印度群岛位于加勒比海", "西印度群岛"),
+        ("印度洋板块与亚欧板块碰撞", None),
+    ],
+)
+def test_region_phrase_evidence_does_not_treat_india_substring_as_country(
+    query, long_place
+):
+    labels = [
+        {
+            "label_path": "知识点@世界地理@世界重要的国家@印度",
+            "exact_names": ["印度"],
+        },
+        {
+            "label_path": "知识点@世界地理@世界重要的地区@东南亚",
+            "exact_names": ["东南亚"],
+            "contained_places": ["印度尼西亚"],
+        },
+        {
+            "label_path": "知识点@世界地理@世界地理微区域@中美洲及加勒比海地区",
+            "exact_names": ["中美洲及加勒比海地区"],
+            "contained_places": ["西印度群岛"],
+        },
+    ]
+
+    evidence = region_phrase_evidence(query, labels, [0, 1, 2])
+    by_label = {item["label_path"]: item for item in evidence}
+
+    assert labels[0]["label_path"] not in by_label
+    if long_place == "印度尼西亚":
+        assert by_label[labels[1]["label_path"]]["contained_places"] == [long_place]
+    elif long_place == "西印度群岛":
+        assert by_label[labels[2]["label_path"]]["contained_places"] == [long_place]
+
+
 def test_question_text_and_gold_cover_root_and_subquestions():
     question = {
         "stem": "公共材料",
