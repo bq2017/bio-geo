@@ -135,6 +135,65 @@ PYTHONPATH=src .venv/bin/python -m bio_geo_tagging.hybrid_candidate_retrieval \
 `question_id`、`parent_id`和`combined_candidates[].label_path`，再关联414个标签的
 完整原释义。
 
+## 第一、二阶段统一运行
+
+正式运行可使用统一入口依次生成打标单元、执行候选召回、运行DS精排、生成自动诊断，
+并合并旧标签与DS新增标签：
+
+```bash
+PYTHONPATH=src .venv/bin/python -m bio_geo_tagging.run_tagging_pipeline \
+  --input data/annotation/geography-high-score-valid-questions-filtered-v2.jsonl \
+  --labels data/taxonomy/geography-existing-definitions.jsonl \
+  --index-dir data/processed/geography-label-retrieval-index-char2-comprehensive-bm25-v3 \
+  --region-index-dir data/processed/geography-region-label-retrieval-index-phrase \
+  --run-dir runs/tagging/geography-full-pipeline-v1 \
+  --audited-exclusions configs/geography_adjudication_audited_exclusions.json \
+  --endpoint http://172.22.0.35:9204/v1/chat/completions \
+  --model DeepSeek-V4-Flash \
+  --disable-thinking \
+  --nonregion-candidate-limit 30 \
+  --region-candidate-limit 5 \
+  --comprehensive-candidate-limit 5 \
+  --region-bm25-min-score 0 \
+  --region-bge-min-score 0.4 \
+  --embedding-model BAAI/bge-large-zh-v1.5 \
+  --device cpu \
+  --batch-size 32 \
+  --workers 30 \
+  --timeout 600 \
+  --retries 3 \
+  --retry-delay 1 \
+  --request-interval 0 \
+  --max-tokens 512
+```
+
+统一运行目录包含：
+
+```text
+geography-full-pipeline-v1/
+├── tagging-units.jsonl
+├── candidates.jsonl
+├── candidate-summary.json
+├── adjudication/
+│   ├── evidence.jsonl
+│   ├── predictions.jsonl
+│   ├── question_predictions.jsonl
+│   ├── report.json
+│   └── run.log
+├── evaluation.json
+├── evaluation_details.jsonl
+├── final_labels.jsonl
+├── pipeline.log
+├── pipeline_manifest.json
+└── pipeline_report.json
+```
+
+相同命令和运行目录可断点续跑：已完成的打标单元和候选召回会跳过，DS精排复用
+`evidence.jsonl`中的成功记录。输入、索引路径、模型或关键参数变化时必须使用新的
+`--run-dir`。任何阶段失败都会停止后续阶段，不能用不完整结果生成最终标签。
+统一入口不会把召回文件中的`knw_labels`或评测字段发送给DS。原来的阶段一、阶段二
+独立命令继续保留，用于单独调试。
+
 ## 第二阶段：候选标签精排
 
 第二阶段从第一阶段候选中选择当前题目或当前小题直接考查的知识点。精排程序兼容：

@@ -34,6 +34,7 @@ question-bge-length-diagnosis = "bio_geo_tagging.bge_length_diagnosis:main"
 question-image-urls = "bio_geo_tagging.attach_question_images:main"
 question-candidate-adjudication = "bio_geo_tagging.run_candidate_adjudication:main"
 question-candidate-adjudication-evaluate = "bio_geo_tagging.adjudication_evaluation:main"
+question-tagging-pipeline = "bio_geo_tagging.run_tagging_pipeline:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
