@@ -26,6 +26,7 @@ question-label-candidates-evaluate = "bio_geo_tagging.call1_candidate_evaluation
 question-label-match = "bio_geo_tagging.question_label_match:main"
 question-label-analysis = "bio_geo_tagging.label_match_analysis:main"
 question-label-diagnose = "bio_geo_tagging.label_definition_diagnosis:main"
+question-label-impact = "bio_geo_tagging.label_definition_impact:main"
 label-retrieval-texts = "bio_geo_tagging.build_retrieval_texts:main"
 region-retrieval-texts = "bio_geo_tagging.build_region_retrieval_texts:main"
 label-retrieval-index = "bio_geo_tagging.build_retrieval_index:main"

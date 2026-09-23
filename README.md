@@ -341,6 +341,27 @@ PYTHONPATH=src python -m bio_geo_tagging.question_label_match score-by-name \
 `(question_id, label_id)`，跳过这些任务，并重新处理错误或未完成的任务；日志仍会覆盖
 写入本次运行。
 
+### 对比标签释义评分与标签名称评分
+
+两份评分完成后，按 `(question_id, label_id)` 对齐，生成逐题差异、逐标签统计和带完整
+题目内容的复核样本：
+
+```bash
+PYTHONPATH=src python -m bio_geo_tagging.label_definition_impact \
+  --definition-jsonl runs/validation/geography-label-match-40pct.jsonl \
+  --name-jsonl runs/validation/geography-label-name-match-40pct.jsonl \
+  --questions-jsonl data/processed/geography-merged-with-labels.jsonl \
+  --definitions-jsonl data/taxonomy/geography-existing-definitions.jsonl \
+  --pairs-output runs/comparison/geography-definition-vs-name-pairs.jsonl \
+  --statistics-output runs/comparison/geography-definition-vs-name-label-statistics.json \
+  --review-output runs/comparison/geography-definition-impact-review-samples.jsonl \
+  --report-output runs/comparison/geography-definition-impact-report.md
+```
+
+`definition_suppressed` 表示标签名称判断匹配、加入释义后不匹配；
+`definition_expanded` 表示标签名称判断不匹配、加入释义后匹配。候选筛选只说明释义
+可能系统性影响判断，仍需结合复核样本区分释义问题、历史误标和模型波动。
+
 ### 阶段性异常知识点分析
 
 先复制正在写入的评分结果作为阶段性快照，再按历史报告口径生成ABCD统计、异常
