@@ -179,6 +179,12 @@ PYTHONPATH=src python -m bio_geo_tagging.call1_candidate_retrieval \
 题目明确依赖图片但没有文字描述时，Prompt会要求模型标记
 `context_insufficient=true`，不得根据答案或解析猜测图片内容。
 
+召回文件只作为候选索引，不作为题目正文输入。程序仅提取记录的
+`question_id`/`parent_id`和`combined_candidates[].label_path`，不会读取或发送
+`knw_labels`、各种`missing_labels`、BM25/BGE分数与排名、`selection_source`或
+区域证据字段。题目正文来自独立生成的打标单元；候选路径会先做与召回顺序无关的
+确定性打乱，再关联标签文件中的完整释义后发送给DS。
+
 普通题执行一次全部候选精排。大题的每个小题同时判断普通标签和区域标签，公共题干
 只作上下文；区域仅作为材料发生地或定位信息时不选。公共题干和全部小题另执行一次
 综合Label专项判断。最终 `question_predictions.jsonl` 将各小题的普通/区域标签与
@@ -188,11 +194,11 @@ PYTHONPATH=src python -m bio_geo_tagging.call1_candidate_retrieval \
 
 ```bash
 PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication \
-  --units data/annotation/geography-tagging-units.jsonl \
-  --candidates runs/retrieval/geography-hybrid-candidates.jsonl \
+  --units data/annotation/geography-high-score-valid-tagging-units-filtered-v2.jsonl \
+  --candidates runs/tagging/geography-hybrid-region-text-v4-filtered-v2-1826.jsonl \
   --labels data/taxonomy/geography-existing-definitions.jsonl \
   --audited-exclusions configs/geography_adjudication_audited_exclusions.json \
-  --run-dir runs/adjudication/geography-smoke-50 \
+  --run-dir runs/tagging/geography-adjudication-smoke-50-v1.4 \
   --endpoint http://172.22.0.35:9204/v1/chat/completions \
   --model DeepSeek-V4-Flash \
   --disable-thinking \
@@ -206,7 +212,7 @@ PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication \
 ```
 
 输出目录包含 `evidence.jsonl`、`predictions.jsonl`、`report.json`、
-`question_predictions.jsonl`、`tail_selected.jsonl` 和 `run_manifest.json`。
+`question_predictions.jsonl` 和 `run_manifest.json`。
 `predictions.jsonl`是逐小题/逐综合专项结果，`question_predictions.jsonl`是整道题最终并集。
 输入文件、模型、Prompt或限制发生变化时，必须使用新的运行目录。
 `--limit`按整道题计数；大题的综合专项和全部小题不会被拆开截断。

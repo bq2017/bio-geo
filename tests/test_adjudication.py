@@ -47,21 +47,21 @@ def test_normalize_candidates_supports_all_current_formats():
     assert normalize_candidates(
         {"candidate_labels": ["知识点@甲", "知识点@乙"]}
     ) == [
-        {
-            "label_id": "知识点@甲",
-            "candidate_rank": 1,
-            "sources": [],
-        },
-        {
-            "label_id": "知识点@乙",
-            "candidate_rank": 2,
-            "sources": [],
-        },
+        {"label_id": "知识点@甲"},
+        {"label_id": "知识点@乙"},
     ]
     hybrid = normalize_candidates(
         {
+            "knw_labels": ["知识点@泄漏金标"],
+            "combined_missing_labels": ["知识点@泄漏缺失标签"],
+            "candidates": [{"label_id": "知识点@非正式候选字段"}],
             "combined_candidates": [
-                {"label_path": "知识点@甲", "bm25_rank": 2},
+                {
+                    "label_path": "知识点@甲",
+                    "bm25_rank": 2,
+                    "bge_raw_score": 0.9,
+                    "selection_source": "bm25_primary",
+                },
                 {
                     "label_path": "知识点@区域@乙",
                     "region_evidence_type": "direct_name",
@@ -69,11 +69,13 @@ def test_normalize_candidates_supports_all_current_formats():
             ]
         }
     )
-    assert hybrid[0]["sources"] == ["bm25"]
-    assert hybrid[1]["sources"] == ["region"]
+    assert hybrid == [
+        {"label_id": "知识点@甲"},
+        {"label_id": "知识点@区域@乙"},
+    ]
     assert normalize_candidates(
         {"candidates": [{"label_id": "知识点@甲", "candidate_rank": 7}]}
-    )[0]["candidate_rank"] == 7
+    ) == [{"label_id": "知识点@甲"}]
 
 
 def test_candidate_index_reuses_root_candidates_for_subquestion():
@@ -212,6 +214,8 @@ def test_build_prompt_maps_geography_fields_and_detects_missing_image():
         "stem": "判断甲乙两地气温差异",
         "answer": "甲地气温低",
         "explanation": "甲地海拔更高",
+        "knw_labels": ["知识点@泄漏金标"],
+        "combined_missing_labels": ["知识点@泄漏缺失标签"],
     }
     labels = {
         "知识点@气温": {
@@ -220,12 +224,19 @@ def test_build_prompt_maps_geography_fields_and_detects_missing_image():
             "label_path": "知识点@气温",
             "definition": "分析气温差异",
             "core_concepts": "海拔影响气温",
+            "assessment_scope": "比较不同地点的气温及其原因",
             "distinctions": "不含降水",
         }
     }
     question, _, _ = build_adjudication_inputs(
         unit,
-        [{"label_id": "知识点@气温", "candidate_rank": 1}],
+        [
+            {
+                "label_id": "知识点@气温",
+                "bm25_rank": 1,
+                "selection_source": "泄漏召回来源",
+            }
+        ],
         labels,
     )
     assert question["parent_stem"] == "读图完成下题"
@@ -234,11 +245,16 @@ def test_build_prompt_maps_geography_fields_and_detects_missing_image():
     assert question["image_context_missing"] is True
     prompt, _, _ = build_adjudication_prompt(
         unit,
-        [{"label_id": "知识点@气温", "candidate_rank": 1}],
+        [{"label_id": "知识点@气温"}],
         labels,
     )
     assert "空间或时间尺度不一致" in prompt
     assert "区域Label" in prompt
+    assert "比较不同地点的气温及其原因" in prompt
+    assert "知识点@泄漏金标" not in prompt
+    assert "知识点@泄漏缺失标签" not in prompt
+    assert "bm25_rank" not in prompt
+    assert "泄漏召回来源" not in prompt
 
 
 def test_validate_result_requires_short_verbatim_evidence():
@@ -351,7 +367,9 @@ def test_run_adjudication_materializes_and_resumes(tmp_path):
         (run_dir / "predictions.jsonl").read_text(encoding="utf-8").strip()
     )
     assert prediction["selected_labels"][0]["label_path"] == "知识点@自然地理@气温"
-    assert prediction["selected_labels"][0]["candidate_rank"] == 1
+    assert prediction["selected_labels"][0]["prompt_position"] == 1
+    assert "bm25_rank" not in prediction["selected_labels"][0]
+    assert "sources" not in prediction["selected_labels"][0]
     assert prediction["root_question_id"] == "root-1"
     question_prediction = json.loads(
         (run_dir / "question_predictions.jsonl").read_text(encoding="utf-8").strip()
@@ -462,14 +480,14 @@ def test_question_predictions_union_subquestion_region_and_comprehensive_labels(
                     "label_id": "知识点@交通区位",
                     "label_path": "知识点@交通区位",
                     "label_name": "交通区位",
-                    "candidate_rank": 2,
+                    "prompt_position": 2,
                     "evidence": "分析港口建设的区位条件",
                 },
                 {
                     "label_id": "知识点@珠江三角洲地区",
                     "label_path": "知识点@珠江三角洲地区",
                     "label_name": "珠江三角洲地区",
-                    "candidate_rank": 10,
+                    "prompt_position": 10,
                     "evidence": "分析珠江三角洲地区交通发展的区位条件",
                 },
             ],
@@ -484,7 +502,7 @@ def test_question_predictions_union_subquestion_region_and_comprehensive_labels(
                     "label_id": "知识点@交通综合",
                     "label_path": "知识点@交通综合",
                     "label_name": "交通综合",
-                    "candidate_rank": 35,
+                    "prompt_position": 35,
                     "evidence": "综合分析交通布局与区域发展的关系",
                 }
             ],

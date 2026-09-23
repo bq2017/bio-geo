@@ -35,6 +35,8 @@ def test_process_file_expands_root_and_sub_questions(tmp_path):
         "options": "",
         "analysis": "",
         "knw_labels": ["知识点@大题标签"],
+        "combined_missing_labels": ["知识点@泄漏标签"],
+        "bm25_candidates": [{"label_path": "知识点@泄漏标签"}],
         "sub_questions": [
             {
                 "parent_id": "parent-1",
@@ -43,6 +45,7 @@ def test_process_file_expands_root_and_sub_questions(tmp_path):
                 "options": "A. 选项",
                 "analysis": "小题解析",
                 "knw_labels": ["知识点@小题标签"],
+                "regional_final_missing_labels": ["知识点@泄漏区域标签"],
             }
         ],
     }

@@ -8,6 +8,25 @@ import os
 from typing import Any, Dict, Iterable
 
 
+QUESTION_FIELDS = {
+    "parent_id",
+    "question_id",
+    "stem",
+    "options",
+    "answer",
+    "answer_text",
+    "analysis",
+    "explanation",
+    "image_description",
+    "flags",
+}
+
+
+def _safe_question_fields(question: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only question content fields that may be used for adjudication."""
+    return {key: question[key] for key in QUESTION_FIELDS if key in question}
+
+
 def configure_logging(log_file: str) -> None:
     """Configure the processing log at the requested local path."""
     os.makedirs(os.path.dirname(os.path.abspath(log_file)), exist_ok=True)
@@ -34,21 +53,12 @@ def expand_question(question: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
     if len(valid_sub_questions) != len(sub_questions):
         logging.warning("题目 %s 包含无效小题记录", root_question_id)
 
-    root_unit = {
-        key: value
-        for key, value in question.items()
-        if key not in {"sub_questions", "knw_ids", "knw_labels"}
-    }
+    root_unit = _safe_question_fields(question)
     root_unit["root_question_id"] = root_question_id
     root_unit["context_stem"] = ""
     if valid_sub_questions:
         root_unit["sub_questions"] = [
-            {
-                key: value
-                for key, value in sub_question.items()
-                if key not in {"knw_ids", "knw_labels"}
-            }
-            for sub_question in valid_sub_questions
+            _safe_question_fields(sub_question) for sub_question in valid_sub_questions
         ]
         root_unit["input_role"] = "whole_question_comprehensive"
     else:
@@ -56,11 +66,7 @@ def expand_question(question: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
     yield root_unit
 
     for sub_question in valid_sub_questions:
-        sub_unit = {
-            key: value
-            for key, value in sub_question.items()
-            if key not in {"knw_ids", "knw_labels"}
-        }
+        sub_unit = _safe_question_fields(sub_question)
         sub_unit["input_role"] = "subquestion"
         sub_unit["root_question_id"] = root_question_id
         sub_unit["context_stem"] = root_stem

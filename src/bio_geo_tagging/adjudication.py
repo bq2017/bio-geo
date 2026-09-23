@@ -16,8 +16,8 @@ from typing import Any, Iterable
 from bio_geo_tagging.ds import DSRequestError, append_evidence, parse_json_content
 
 
-PROMPT_VERSION = "geography-candidate-adjudication-v1.3-subquestion-region-labels"
-CANDIDATE_ORDER_VERSION = "geography-candidate-order-v1"
+PROMPT_VERSION = "geography-candidate-adjudication-v1.4-no-retrieval-leakage"
+CANDIDATE_ORDER_VERSION = "geography-candidate-order-v2"
 IMAGE_REFERENCE_RE = re.compile(r"(?:读图|据图|下图|上图|图中|该图|如图|示意图|图示)")
 
 
@@ -162,29 +162,13 @@ def load_labels(path: str | Path) -> dict[str, dict[str, str]]:
     return labels
 
 
-def _candidate_sources(candidate: dict[str, Any]) -> list[str]:
-    raw_sources = candidate.get("sources")
-    if isinstance(raw_sources, list):
-        sources = [_as_text(value) for value in raw_sources if _as_text(value)]
-    else:
-        source = _as_text(candidate.get("source"))
-        sources = [source] if source else []
-    if candidate.get("bm25_rank") is not None and "bm25" not in sources:
-        sources.append("bm25")
-    if candidate.get("bge_rank") is not None and "bge" not in sources:
-        sources.append("bge")
-    if candidate.get("region_evidence_type") and "region" not in sources:
-        sources.append("region")
-    return sources
-
-
 def normalize_candidates(row: dict[str, Any]) -> list[dict[str, Any]]:
-    """Normalize biology-style, hybrid, or DS-call-1 candidate rows."""
+    """Extract candidate label paths without retaining retrieval metadata."""
     raw_candidates: Any
-    if "candidates" in row:
-        raw_candidates = row.get("candidates")
-    elif "combined_candidates" in row:
+    if "combined_candidates" in row:
         raw_candidates = row.get("combined_candidates")
+    elif "candidates" in row:
+        raw_candidates = row.get("candidates")
     elif "candidate_labels" in row:
         raw_candidates = row.get("candidate_labels")
     else:
@@ -197,10 +181,8 @@ def normalize_candidates(row: dict[str, Any]) -> list[dict[str, Any]]:
     for index, raw in enumerate(raw_candidates, 1):
         if isinstance(raw, str):
             label_id = raw.strip()
-            source: dict[str, Any] = {}
         elif isinstance(raw, dict):
-            label_id = _as_text(raw.get("label_id") or raw.get("label_path"))
-            source = raw
+            label_id = _as_text(raw.get("label_path") or raw.get("label_id"))
         else:
             raise ValueError(f"candidate {index} must be a string or object")
         if not label_id:
@@ -208,17 +190,7 @@ def normalize_candidates(row: dict[str, Any]) -> list[dict[str, Any]]:
         if label_id in seen:
             raise ValueError(f"duplicate candidate label: {label_id}")
         seen.add(label_id)
-        rank = source.get("candidate_rank") or source.get("rank") or index
-        if isinstance(rank, bool) or not isinstance(rank, (int, float)):
-            raise ValueError(f"candidate {label_id} has invalid rank")
-        candidates.append(
-            {
-                **source,
-                "label_id": label_id,
-                "candidate_rank": int(rank),
-                "sources": _candidate_sources(source),
-            }
-        )
+        candidates.append({"label_id": label_id})
     return candidates
 
 
@@ -228,7 +200,6 @@ class CandidateIndex:
     def __init__(self, rows: Iterable[dict[str, Any]]) -> None:
         self.by_unit_key: dict[str, list[dict[str, Any]]] = {}
         by_question_id: dict[str, list[list[dict[str, Any]]]] = defaultdict(list)
-        self.versions: set[str] = set()
         for row in rows:
             candidates = normalize_candidates(row)
             unit_key = _as_text(row.get("unit_key"))
@@ -236,16 +207,11 @@ class CandidateIndex:
                 if unit_key in self.by_unit_key:
                     raise ValueError(f"duplicate candidate unit_key: {unit_key}")
                 self.by_unit_key[unit_key] = candidates
-            question_id = _as_text(row.get("question_id"))
+            question_id = _as_text(row.get("question_id") or row.get("parent_id"))
             if not question_id and not unit_key:
                 raise ValueError("candidate row lacks question_id and unit_key")
             if question_id:
                 by_question_id[question_id].append(candidates)
-            version = _as_text(
-                row.get("retrieval_version") or row.get("pipeline_version")
-            )
-            if version:
-                self.versions.add(version)
         self.by_question_id = dict(by_question_id)
 
     def resolve(self, unit: dict[str, Any]) -> list[dict[str, Any]]:
@@ -419,6 +385,7 @@ def build_adjudication_inputs(
                 "label_path": label["label_path"],
                 "definition": label["definition"],
                 "core_concepts": label["core_concepts"],
+                "assessment_scope": label.get("assessment_scope", ""),
                 "distinctions": label["distinctions"],
             }
         )
@@ -500,7 +467,7 @@ def build_adjudication_prompt(
 {scope_instruction}
 
 一、先界定Label
-Label有效范围由label_name、label_path、definition和distinctions共同确定。distinctions是硬否决边界。core_concepts只解释范围内的概念、规律和方法，不能扩大Label范围；只命中一个地名、现象、材料、关键词或底层机制不足以选中Label。
+Label有效范围由label_name、label_path、definition、assessment_scope和distinctions共同确定。distinctions是硬否决边界。core_concepts和assessment_scope只解释范围内的概念、规律、方法和常见考查方式，不能扩大Label范围；只命中一个地名、现象、材料、关键词或底层机制不足以选中Label。
 
 二、硬否决：任意一项成立就拒绝，后续不得翻回
 1. 区域不一致：地区或地名只是材料载体时，不自动选择该区域Label。区域Label只有在该区域的位置、环境特征、空间差异、区域联系或区域发展本身被直接考查时才能选择。不得把区域A的特有知识横向迁移到区域B。
@@ -701,7 +668,10 @@ def write_question_predictions(
                     )
             selected_labels = sorted(
                 selected_by_id.values(),
-                key=lambda label: (label["candidate_rank"], label["label_id"]),
+                key=lambda label: (
+                    int(label.get("prompt_position", 0)),
+                    label["label_id"],
+                ),
             )
             needs_review = any(component["needs_review"] for component in components)
             usable_for_training = bool(selected_labels and not needs_review)
@@ -802,7 +772,6 @@ def run_adjudication(
             "candidates": _file_sha256(candidates_path),
             "labels": _file_sha256(labels_path),
         },
-        "candidate_retrieval_versions": sorted(candidate_index.versions),
         "candidate_count_distribution": candidate_count_distribution,
         "audited_exclusions": (
             {
@@ -943,26 +912,18 @@ def run_adjudication(
     )
     predictions_path = output_dir / "predictions.jsonl"
     predictions_temporary = predictions_path.with_name(f".{predictions_path.name}.tmp")
-    tail_path = output_dir / "tail_selected.jsonl"
-    tail_temporary = tail_path.with_name(f".{tail_path.name}.tmp")
     selected_count_distribution: Counter[str] = Counter()
-    selected_rank_distribution: Counter[str] = Counter()
     training_filter_reasons: Counter[str] = Counter()
     need_expand = 0
     none_count = 0
     context_insufficient_count = 0
     usable_for_training_count = 0
-    questions_using_rank_21_plus = 0
-    selected_from_rank_21_plus = 0
     audited_exclusion_questions = 0
     audited_excluded_labels = 0
     unknown_selected_codes_dropped_count = 0
     materialized_predictions: list[dict[str, Any]] = []
 
-    with (
-        predictions_temporary.open("w", encoding="utf-8", newline="\n") as output,
-        tail_temporary.open("w", encoding="utf-8", newline="\n") as tail_output,
-    ):
+    with predictions_temporary.open("w", encoding="utf-8", newline="\n") as output:
         for unit in units:
             unit_key = make_unit_key(unit)
             record = completed.get(unit_key)
@@ -972,24 +933,21 @@ def run_adjudication(
             parsed = record["parsed_response"]
             code_map = record["candidate_code_map"]
             candidates = candidates_by_unit[unit_key]
-            candidates_by_id = {candidate["label_id"]: candidate for candidate in candidates}
+            prompt_position_by_label = {
+                label_id: int(code.removeprefix("C"))
+                for code, label_id in code_map.items()
+            }
             selected_labels: list[dict[str, Any]] = []
             for code in parsed["selected"]:
                 label_id = code_map[code]
                 label = labels_by_id[label_id]
-                candidate = candidates_by_id[label_id]
-                rank = int(candidate["candidate_rank"])
                 selected_labels.append(
                     {
                         "label_id": label_id,
                         "taxonomy_label_id": label.get("taxonomy_label_id", ""),
                         "label_name": label["label_name"],
                         "label_path": label["label_path"],
-                        "candidate_rank": rank,
-                        "sources": candidate.get("sources", []),
-                        "bm25_rank": candidate.get("bm25_rank"),
-                        "bge_rank": candidate.get("bge_rank"),
-                        "region_evidence_type": candidate.get("region_evidence_type"),
+                        "prompt_position": prompt_position_by_label[label_id],
                         "evidence": parsed["evidence"][code],
                     }
                 )
@@ -999,16 +957,8 @@ def run_adjudication(
                 )
             )
             selected_labels.sort(
-                key=lambda item: (item["candidate_rank"], item["label_id"])
+                key=lambda item: (item["prompt_position"], item["label_id"])
             )
-            used_rank_21_plus = any(
-                int(label["candidate_rank"]) >= 21 for label in selected_labels
-            )
-            questions_using_rank_21_plus += int(used_rank_21_plus)
-            for label in selected_labels:
-                rank = int(label["candidate_rank"])
-                selected_rank_distribution[str(rank)] += 1
-                selected_from_rank_21_plus += int(rank >= 21)
             if removed_by_audit:
                 audited_exclusion_questions += 1
                 audited_excluded_labels += len(removed_by_audit)
@@ -1074,17 +1024,7 @@ def run_adjudication(
             }
             materialized_predictions.append(prediction)
             output.write(json.dumps(prediction, ensure_ascii=False, sort_keys=True) + "\n")
-            if used_rank_21_plus:
-                tail_output.write(
-                    json.dumps(
-                        {"question": unit, "prediction": prediction},
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    )
-                    + "\n"
-                )
     predictions_temporary.replace(predictions_path)
-    tail_temporary.replace(tail_path)
     question_prediction_summary = write_question_predictions(
         output_dir / "question_predictions.jsonl", materialized_predictions
     )
@@ -1146,11 +1086,6 @@ def run_adjudication(
         "selected_count_distribution": dict(
             sorted(selected_count_distribution.items(), key=lambda item: int(item[0]))
         ),
-        "selected_candidate_rank_distribution": dict(
-            sorted(selected_rank_distribution.items(), key=lambda item: int(item[0]))
-        ),
-        "selected_from_rank_21_plus": selected_from_rank_21_plus,
-        "questions_using_rank_21_plus": questions_using_rank_21_plus,
         "need_expand_recall": need_expand,
         "none_of_candidates": none_count,
         "context_insufficient": context_insufficient_count,
@@ -1161,7 +1096,6 @@ def run_adjudication(
         "audited_exclusion_questions": audited_exclusion_questions,
         "audited_excluded_labels": audited_excluded_labels,
         "input_sha256": manifest["input_sha256"],
-        "candidate_retrieval_versions": sorted(candidate_index.versions),
         "candidate_count_distribution": candidate_count_distribution,
         "model": model,
         "prompt_version": PROMPT_VERSION,
