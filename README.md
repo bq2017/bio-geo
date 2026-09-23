@@ -268,8 +268,10 @@ PYTHONPATH=src python -m bio_geo_tagging.question_label_match score-by-name \
 ```
 
 小批量验证后去掉 `--limit 10` 运行全部旧任务。命令不会读取释义文件，也不会根据
-题目当前的 `knw_labels` 增加任务；每次运行都会覆盖新结果文件和日志，不影响旧的
-释义评分结果。
+题目当前的 `knw_labels` 增加任务；默认会覆盖新结果文件和日志，不影响旧的释义评分
+结果。若任务中断，续跑时加上 `--resume`：程序保留输出文件中已完成的
+`(question_id, label_id)`，跳过这些任务，并重新处理错误或未完成的任务；日志仍会覆盖
+写入本次运行。
 
 ### 阶段性异常知识点分析
 

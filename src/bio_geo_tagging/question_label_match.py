@@ -137,6 +137,19 @@ def read_complete_questions(path: str):
         yield unit
 
 
+def _read_existing_pair_tasks(path: str):
+    """Read the exact question-label pairs from a previous scoring file."""
+    for number, record in read_jsonl(path):
+        question_id_value = record.get("question_id")
+        label_id_value = record.get("label_id")
+        question_id = "" if question_id_value is None else str(question_id_value)
+        label_id = "" if label_id_value is None else str(label_id_value)
+        label = record.get("knw_label")
+        if not question_id or not label_id or not isinstance(label, str) or not label:
+            raise ValueError(f"原评分文件第 {number} 行缺少题目或标签标识")
+        yield question_id, label_id, label
+
+
 def request_assessment(client: OpenAI, model: str, system_prompt: str, payload: dict) -> dict:
     chunks = client.chat.completions.create(
         model=model,
@@ -315,6 +328,7 @@ def score_existing_pairs_by_name(
     limit: int | None = None,
     timeout: float = 180.0,
     log_file: str | None = None,
+    resume: bool = False,
 ) -> dict[str, int]:
     """Rescore exactly the prior question-label pairs using only label paths."""
     if workers < 1 or limit is not None and limit < 1:
@@ -327,18 +341,36 @@ def score_existing_pairs_by_name(
             raise ValueError(f"聚合题目文件中重复的question_id: {question_id}")
         questions[question_id] = unit
 
-    def pending_tasks():
-        for number, record in read_jsonl(pairs_file):
-            question_id_value = record.get("question_id")
-            label_id_value = record.get("label_id")
-            question_id = "" if question_id_value is None else str(question_id_value)
-            label_id = "" if label_id_value is None else str(label_id_value)
-            label = record.get("knw_label")
-            if not question_id or not label_id or not isinstance(label, str) or not label:
-                raise ValueError(f"原评分文件第 {number} 行缺少题目或标签标识")
-            yield question_id, label_id, label
+    target = Path(output)
+    completed_keys = set()
+    if resume and target.exists():
+        retained_records = []
+        with target.open(encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, 1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    # 中断时可能留下不完整的最后一行，续跑时丢弃该行。
+                    continue
+                key = (
+                    str(record.get("question_id", "")),
+                    str(record.get("label_id", "")),
+                )
+                if record.get("status") == "completed" and key not in completed_keys:
+                    completed_keys.add(key)
+                    retained_records.append(record)
+        with target.open("w", encoding="utf-8") as stream:
+            for record in retained_records:
+                stream.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    total_pairs = sum(1 for _ in read_jsonl(pairs_file))
+    def pending_tasks():
+        for task in _read_existing_pair_tasks(pairs_file):
+            if (task[0], task[1]) not in completed_keys:
+                yield task
+
+    total_pairs = sum(1 for _ in pending_tasks())
     if limit is not None:
         total_pairs = min(total_pairs, limit)
 
@@ -358,6 +390,8 @@ def score_existing_pairs_by_name(
         model,
         base_url,
     )
+    if resume:
+        run_logger.info("resume_enabled retained_completed=%s", len(completed_keys))
 
     def evaluate(task):
         question_id, label_id, label = task
@@ -387,9 +421,9 @@ def score_existing_pairs_by_name(
             )
         return result
 
-    target = Path(output)
     target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", encoding="utf-8") as stream, ThreadPoolExecutor(max_workers=workers) as pool:
+    output_mode = "a" if resume else "w"
+    with target.open(output_mode, encoding="utf-8") as stream, ThreadPoolExecutor(max_workers=workers) as pool:
         from itertools import islice
 
         tasks = pending_tasks()
@@ -460,6 +494,11 @@ def main() -> None:
     name_scoring.add_argument("--limit", type=int)
     name_scoring.add_argument("--timeout", type=float, default=180.0)
     name_scoring.add_argument(
+        "--resume",
+        action="store_true",
+        help="保留输出文件中已完成记录，跳过这些任务并重试其余任务",
+    )
+    name_scoring.add_argument(
         "--log-file",
         required=True,
         help="Overwrite this file with run progress and request errors",
@@ -470,7 +509,7 @@ def main() -> None:
     elif arguments.command == "score":
         print(json.dumps(score_units(arguments.input_jsonl, arguments.definitions_jsonl, arguments.output_jsonl, arguments.base_url, arguments.model, arguments.workers, arguments.limit, arguments.timeout, arguments.log_file), ensure_ascii=False))
     else:
-        print(json.dumps(score_existing_pairs_by_name(arguments.pairs_jsonl, arguments.questions_jsonl, arguments.output_jsonl, arguments.base_url, arguments.model, arguments.workers, arguments.limit, arguments.timeout, arguments.log_file), ensure_ascii=False))
+        print(json.dumps(score_existing_pairs_by_name(arguments.pairs_jsonl, arguments.questions_jsonl, arguments.output_jsonl, arguments.base_url, arguments.model, arguments.workers, arguments.limit, arguments.timeout, arguments.log_file, arguments.resume), ensure_ascii=False))
 
 
 if __name__ == "__main__":
