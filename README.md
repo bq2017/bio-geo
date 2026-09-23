@@ -84,78 +84,56 @@ question-tagging-sample \
 不属于当前414标签的题目不进入样本。正式抽取1000题时只需把文件名中的
 `30` 和 `--groups 30` 改为 `1000`。
 
-## 调用一：候选标签召回
+## 阶段一：混合候选召回
 
-调用一读取完整原题和414条简明标签目录。一道普通题调用一次完整流程；一道
-大题把公共题干和全部小题作为一个整体调用一次完整流程，得到整道题共用的
-候选集合。为避免超过模型上下文限制，脚本把目录均分为三批，分别召回后合并：
+正式阶段一不调用DS。程序对每道完整题目同时执行字符级BM25和
+`BAAI/bge-large-zh-v1.5`语义召回，并分别处理普通标签、区域标签和综合标签：
 
-```bash
-question-label-candidates \
-  --input data/annotation/geography-whole-question-sample-30.jsonl \
-  --catalog data/processed/geography-labels-call1-catalog.txt \
-  --output runs/tagging/geography-call1-whole-question-sample-30-candidates.jsonl \
-  --log-file runs/logs/geography-call1-whole-question-sample-30-candidates.log \
-  --base-url http://172.22.0.35:9204/v1 \
-  --model DeepSeek-V4-Flash \
-  --concurrency 10
-```
+- 普通标签：BM25优先保留21个，再由BGE补充至30个；
+- 区域标签：使用78个区域标签的名称、别称、包含地点和代表地点信息，最多保留5个；
+- 综合标签：使用专用检索文本和加权RRF排序，最多保留5个；
+- 每道题最终最多得到40个候选标签。
 
-脚本不会把输入数据中已有的 `knw_labels` 发送给模型。候选标签必须是目录中的
-完整路径，三批合并后最多20个且不要求凑满。合并结果超过20个时，脚本会让
-模型根据原题从合并候选中收敛一次，不直接截断。运行中断后重复执行同一命令
-即可跳过已完成的打标单元。
+正式文件如下：
 
-使用题目中已有的 `knw_labels` 检查候选召回：
+| 用途 | 文件 |
+| --- | --- |
+| 完整题目输入 | `data/annotation/geography-high-score-valid-questions-filtered-v2.jsonl` |
+| 414个标签完整原释义 | `data/taxonomy/geography-existing-definitions.jsonl` |
+| 78个区域标签元数据 | `data/taxonomy/geography-region-label-metadata.jsonl` |
+| 普通及综合标签索引 | `data/processed/geography-label-retrieval-index-char2-comprehensive-bm25-v3/` |
+| 区域标签索引 | `data/processed/geography-region-label-retrieval-index-phrase/` |
+| 阶段一候选结果 | `runs/tagging/geography-stage1-final-candidates-1826.jsonl` |
+| 阶段一评测汇总 | `runs/tagging/geography-stage1-final-summary-1826.json` |
 
-```bash
-question-label-candidates-evaluate \
-  --input data/annotation/geography-whole-question-sample-30.jsonl \
-  --candidates runs/tagging/geography-call1-whole-question-sample-30-candidates.jsonl \
-  --catalog data/processed/geography-labels-call1-catalog.txt \
-  --summary-output runs/tagging/geography-call1-whole-question-sample-30-evaluation-summary.json \
-  --missing-output runs/tagging/geography-call1-whole-question-sample-30-missed-labels.jsonl
-```
-
-每条候选结果直接与同一道完整原题顶层的 `knw_labels` 比较，不再合并多个
-打标单元，因此不使用 `--group-by-root`。汇总文件记录全量覆盖率和逐标签
-召回率；明细文件记录漏召回标签以及无法与当前414个标签对应的原标签。
-
-诊断调用一的漏召回和无关候选时，可以从完整原题中随机抽取100题，指定50道大题
-和50道普通题，并保存每批召回及收敛前后的候选：
+正式运行命令：
 
 ```bash
-PYTHONPATH=src python -m bio_geo_tagging.sample_tagging_groups \
-  --input data/processed/geography-merged-with-labels.jsonl \
-  --catalog data/processed/geography-labels-call1-catalog.txt \
-  --output data/annotation/geography-whole-question-sample-100.jsonl \
-  --summary-output runs/tagging/geography-whole-question-sample-100-summary.json \
-  --groups 100 --big-questions 50 --seed 20260917
+export HF_ENDPOINT=https://hf-mirror.com
+export HF_HUB_DISABLE_XET=1
+export HF_HUB_DOWNLOAD_TIMEOUT=600
+export HF_HUB_ETAG_TIMEOUT=60
 
-PYTHONPATH=src python -m bio_geo_tagging.call1_candidate_retrieval \
-  --input data/annotation/geography-whole-question-sample-100.jsonl \
-  --catalog data/processed/geography-labels-call1-catalog.txt \
-  --output runs/tagging/geography-call1-sample-100-candidates.jsonl \
-  --trace-output runs/tagging/geography-call1-sample-100-trace.jsonl \
-  --log-file runs/logs/geography-call1-sample-100.log \
-  --base-url http://172.22.0.35:9204/v1 \
-  --model DeepSeek-V4-Flash --concurrency 20
+PYTHONPATH=src .venv/bin/python -m bio_geo_tagging.hybrid_candidate_retrieval \
+  --input data/annotation/geography-high-score-valid-questions-filtered-v2.jsonl \
+  --index-dir data/processed/geography-label-retrieval-index-char2-comprehensive-bm25-v3 \
+  --region-index-dir data/processed/geography-region-label-retrieval-index-phrase \
+  --output runs/tagging/geography-stage1-final-candidates-1826.jsonl \
+  --summary-output runs/tagging/geography-stage1-final-summary-1826.json \
+  --nonregion-candidate-limit 30 \
+  --region-candidate-limit 5 \
+  --comprehensive-candidate-limit 5 \
+  --region-bm25-min-score 0 \
+  --region-bge-min-score 0.4 \
+  --embedding-model BAAI/bge-large-zh-v1.5 \
+  --device cpu \
+  --batch-size 32
 ```
 
-诊断文件逐题记录三批候选、收敛前候选以及是否执行收敛；原候选结果文件格式不变。
-重复执行同一命令会跳过已完成且有诊断记录的题目。
-
-如果要从释义诊断结果中提取原标签均已确认为有效的题目，可在抽样命令中增加：
-
-```bash
-  --diagnosis-jsonl runs/analysis/geography-label-definition-diagnosis-40pct.jsonl
-```
-
-脚本以“题目ID＋标签路径”为单位读取每个标签的 `high_score_valid_ids`。多标签题
-必须所有原标签都属于 `high_score_valid_ids` 才能进入样本；只确认部分标签的题目
-会被整体排除。汇总中的 `excluded_unvalidated_groups` 记录因此被排除的题目数。
-如果不限定抽样数量，希望输出全部符合条件的题目，使用 `--all-eligible`，并且不要
-同时传入 `--big-questions`。
+区域标签元数据属于标签体系的检索补充信息；由它生成的区域检索文本和索引属于
+可重建的中间文件。第二阶段不读取区域元数据或召回分数，只从阶段一结果中提取
+`question_id`、`parent_id`和`combined_candidates[].label_path`，再关联414个标签的
+完整原释义。
 
 ## 第二阶段：候选标签精排
 

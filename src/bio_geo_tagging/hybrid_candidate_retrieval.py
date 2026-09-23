@@ -19,15 +19,14 @@ QUESTION_TEXT_FIELDS = (
     "image_description",
 )
 
-REGION_PRIMARY_TEXT_FIELDS = (
+REGION_EXACT_TEXT_FIELDS = (
     "stem",
-    "image_description",
-)
-REGION_WEAK_TEXT_FIELDS = (
     "answer",
+    "image_description",
     "analysis",
     "explanation",
 )
+REGION_WEAK_TEXT_FIELDS: tuple[str, ...] = ()
 
 CHINA_REGION_BRANCHES = {"中国地理分区", "中国地理微区域"}
 WORLD_REGION_BRANCHES = {
@@ -42,13 +41,15 @@ COMPREHENSIVE_RRF_K = 60
 COMPREHENSIVE_BM25_WEIGHT = 0.25
 COMPREHENSIVE_BGE_WEIGHT = 0.75
 REGION_DIAGNOSTIC_LIMIT = 20
+REGION_REPRESENTATIVE_BGE_MAX_RANK = 10
+REGION_BGE_ONLY_MAX_RANK = 5
 COMPREHENSIVE_DIAGNOSTIC_LIMIT = 20
 PLACE_NAME_FALSE_SUBSTRING_BLOCKERS = {
     "印度": ("印度尼西亚", "西印度群岛", "印度洋"),
 }
 
 # These labels contain “综合” in the leaf name, but describe a concrete topic or
-# question type rather than an umbrella label. They stay in the original V3 pool.
+# question type rather than an umbrella label. They stay in the ordinary pool.
 NON_UMBRELLA_COMPREHENSIVE_LABELS = {
     "知识点@区域发展@区域发展@生态脆弱区的综合治理",
     "知识点@区域发展@区域发展@北方农牧交错带土地退化的综合治理",
@@ -117,7 +118,7 @@ def question_region_evidence_texts(question: dict[str, Any]) -> tuple[str, str]:
     weak_parts: list[str] = []
 
     def append_fields(record: dict[str, Any]) -> None:
-        for field in REGION_PRIMARY_TEXT_FIELDS:
+        for field in REGION_EXACT_TEXT_FIELDS:
             text = as_text(record.get(field))
             if text:
                 parts.append(text)
@@ -379,42 +380,33 @@ def admitted_region_label_paths(
         has_weak_direct_or_contained_place = bool(
             item.get("weak_direct_names") or item.get("weak_contained_places")
         )
-        bm25_rank = bm25_ranks.get(label_path)
+        has_weak_representative_place = bool(
+            item.get("weak_representative_places")
+        )
         bge_rank = bge_ranks.get(label_path)
-        has_bm25_top_five = bm25_rank is not None and bm25_rank <= 5
-        has_bge_top_five = bge_rank is not None and bge_rank <= 5
-        has_dual_top_twenty = (
-            bm25_rank is not None
-            and bm25_rank <= 20
-            and bge_rank is not None
-            and bge_rank <= 20
-        )
-        has_either_top_twenty = (
-            bm25_rank is not None and bm25_rank <= 20
-        ) or (
-            bge_rank is not None and bge_rank <= 20
-        )
-        has_either_top_ten = (
-            bm25_rank is not None and bm25_rank <= 10
-        ) or (
-            bge_rank is not None and bge_rank <= 10
-        )
         has_supported_representative_place = (
             has_representative_place
-            and has_either_top_twenty
+            and bge_rank is not None
+            and bge_rank <= REGION_REPRESENTATIVE_BGE_MAX_RANK
+        )
+        has_strong_bge_support = (
+            bge_rank is not None and bge_rank <= REGION_BGE_ONLY_MAX_RANK
         )
         has_supported_weak_place = (
             has_weak_direct_or_contained_place
-            and has_either_top_ten
+            and bge_rank is not None
+            and bge_rank <= REGION_REPRESENTATIVE_BGE_MAX_RANK
+        ) or (
+            has_weak_representative_place
+            and bge_rank is not None
+            and bge_rank <= REGION_BGE_ONLY_MAX_RANK
         )
         if (
             has_direct_evidence
             or has_contained_place
             or has_supported_representative_place
             or has_supported_weak_place
-            or has_dual_top_twenty
-            or has_bm25_top_five
-            or has_bge_top_five
+            or has_strong_bge_support
         ):
             admitted.add(label_path)
     return admitted
@@ -564,7 +556,7 @@ def rank_region_candidates(
     phrase_evidence: list[dict[str, Any]],
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Rank admitted regions by independent support, then route RRF."""
+    """Rank admitted regions by evidence type, then semantic rank."""
     bm25_by_label = {item["label_path"]: item for item in bm25_candidates}
     bge_by_label = {item["label_path"]: item for item in bge_candidates}
     evidence_by_label = {
@@ -580,51 +572,6 @@ def rank_region_candidates(
         bm25 = bm25_by_label.get(label_path)
         bge = bge_by_label.get(label_path)
         evidence = evidence_by_label.get(label_path, {})
-        bm25_rank = bm25["rank"] if bm25 else None
-        bge_rank = bge["rank"] if bge else None
-        has_either_top_twenty = (
-            bm25_rank is not None and bm25_rank <= 20
-        ) or (
-            bge_rank is not None and bge_rank <= 20
-        )
-        has_dual_top_twenty = (
-            bm25_rank is not None
-            and bm25_rank <= 20
-            and bge_rank is not None
-            and bge_rank <= 20
-        )
-        has_single_top_five = (
-            bm25_rank is not None and bm25_rank <= 5
-        ) or (
-            bge_rank is not None and bge_rank <= 5
-        )
-        has_either_top_ten = (
-            bm25_rank is not None and bm25_rank <= 10
-        ) or (
-            bge_rank is not None and bge_rank <= 10
-        )
-        has_primary_direct_or_contained = bool(
-            evidence.get("direct_names") or evidence.get("contained_places")
-        )
-        has_primary_representative = bool(evidence.get("representative_places"))
-        has_weak_direct_or_contained = bool(
-            evidence.get("weak_direct_names")
-            or evidence.get("weak_contained_places")
-        )
-
-        if has_primary_direct_or_contained and has_either_top_twenty:
-            support_band = 1
-        elif has_dual_top_twenty:
-            support_band = 2
-        elif has_primary_representative and has_either_top_twenty:
-            support_band = 3
-        elif has_single_top_five:
-            support_band = 4
-        elif has_weak_direct_or_contained and has_either_top_ten:
-            support_band = 5
-        else:
-            support_band = 6
-
         if evidence.get("direct_names"):
             evidence_tier = 1
             evidence_type = "direct_name"
@@ -633,26 +580,20 @@ def rank_region_candidates(
             evidence_type = "contained_place"
         elif evidence.get("representative_places"):
             evidence_tier = 3
-            evidence_type = "representative_place_with_retrieval"
+            evidence_type = "representative_place_with_bge"
         elif (
             evidence.get("weak_direct_names")
             or evidence.get("weak_contained_places")
             or evidence.get("weak_representative_places")
         ):
             evidence_tier = 4
-            evidence_type = "analysis_place_with_retrieval"
+            evidence_type = "analysis_place_with_bge"
         else:
             evidence_tier = 5
             evidence_type = "bge_fallback"
-        route_rrf_score = (
-            (0.5 / (60 + bm25_rank) if bm25_rank is not None else 0.0)
-            + (0.5 / (60 + bge_rank) if bge_rank is not None else 0.0)
-        )
         ranked.append(
             {
                 "label_path": label_path,
-                "region_support_band": support_band,
-                "region_route_rrf_score": round(route_rrf_score, 10),
                 "region_evidence_type": evidence_type,
                 "region_evidence_tier": evidence_tier,
                 "matched_direct_names": evidence.get("direct_names") or [],
@@ -661,24 +602,17 @@ def rank_region_candidates(
                 "matched_analysis_direct_names": evidence.get("weak_direct_names") or [],
                 "matched_analysis_contained_places": evidence.get("weak_contained_places") or [],
                 "matched_analysis_representative_places": evidence.get("weak_representative_places") or [],
-                "region_bm25_rank": bm25_rank,
+                "region_bm25_rank": bm25["rank"] if bm25 else None,
                 "region_bm25_raw_score": bm25["score"] if bm25 else None,
-                "region_bge_rank": bge_rank,
+                "region_bge_rank": bge["rank"] if bge else None,
                 "region_bge_raw_score": bge["score"] if bge else None,
             }
         )
     ranked.sort(
         key=lambda item: (
-            item["region_support_band"],
-            -item["region_route_rrf_score"],
-            min(
-                item["region_bm25_rank"]
-                if item["region_bm25_rank"] is not None
-                else 10**9,
-                item["region_bge_rank"]
-                if item["region_bge_rank"] is not None
-                else 10**9,
-            ),
+            item["region_evidence_tier"],
+            item["region_bge_rank"] if item["region_bge_rank"] is not None else 10**9,
+            item["region_bm25_rank"] if item["region_bm25_rank"] is not None else 10**9,
             item["label_path"],
         )
     )

@@ -10,7 +10,10 @@ from bio_geo_tagging.build_region_retrieval_texts import (
 
 
 RESOURCE_PATH = (
-    Path(__file__).parents[1] / "resources" / "geography-region-name-info.jsonl"
+    Path(__file__).parents[1]
+    / "data"
+    / "taxonomy"
+    / "geography-region-label-metadata.jsonl"
 )
 
 
