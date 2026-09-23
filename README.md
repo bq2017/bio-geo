@@ -176,7 +176,7 @@ PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication \
   --candidates runs/tagging/geography-stage1-final-candidates-1826.jsonl \
   --labels data/taxonomy/geography-existing-definitions.jsonl \
   --audited-exclusions configs/geography_adjudication_audited_exclusions.json \
-  --run-dir runs/tagging/geography-adjudication-smoke-50-v1.4 \
+  --run-dir runs/tagging/geography-adjudication-smoke-50-v1.5 \
   --endpoint http://172.22.0.35:9204/v1/chat/completions \
   --model DeepSeek-V4-Flash \
   --disable-thinking \
@@ -193,8 +193,29 @@ PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication \
 `question_predictions.jsonl`、`run_manifest.json` 和 `run.log`。`run.log`会追加记录
 每次启动、逐单元`OK/ERROR`进度、错误原因和最终汇总，可用`tail -f`实时查看。
 `predictions.jsonl`是逐小题/逐综合专项结果，`question_predictions.jsonl`是整道题最终并集。
+整题结果同时记录 `expected_component_count`、`completed_component_count`、
+`components_complete` 和 `missing_component_units`；任一预期单元未成功时，整题不可训练。
 输入文件、模型、Prompt或限制发生变化时，必须使用新的运行目录。
 `--limit`按整道题计数；大题的综合专项和全部小题不会被拆开截断。
+
+打标完成后可离线对比第一阶段文件中的现有 `knw_labels`。评测程序不会调用DS，
+也不会把金标加入Prompt：
+
+```bash
+PYTHONPATH=src python -m bio_geo_tagging.adjudication_evaluation \
+  --run-dir runs/tagging/geography-adjudication-smoke-100-v1.5 \
+  --gold-candidates runs/tagging/geography-stage1-final-candidates-1826.jsonl \
+  --labels data/taxonomy/geography-existing-definitions.jsonl
+```
+
+输出 `evaluation.json` 和 `evaluation_details.jsonl`。前者包含已完成整题的多标签
+micro Precision、Recall、F1、整题完全匹配率，以及仅针对
+`usable_for_training=true` 整题的同组指标；后者逐题列出命中、多选和漏选标签。
+缺少任一预期组件的整题只计入 `incomplete_question_predictions` 和
+`attempted_questions_without_complete_prediction`，不进入标签准确率，避免把运行失败
+误算成模型漏标。
+这些指标衡量与现有 `knw_labels` 的一致性；若旧标签本身不完整，多选项仍需人工复核，
+不能直接视为DS错误。
 
 ## 原标签与原释义匹配评分
 

@@ -257,7 +257,7 @@ def test_build_prompt_maps_geography_fields_and_detects_missing_image():
     assert "泄漏召回来源" not in prompt
 
 
-def test_validate_result_requires_short_verbatim_evidence():
+def test_validate_result_requires_nonempty_evidence_up_to_300_characters():
     question = {
         "parent_stem": "",
         "stem": "判断甲乙两地气温差异",
@@ -279,11 +279,23 @@ def test_validate_result_requires_short_verbatim_evidence():
         question,
     )
     assert parsed["selected"] == ["C01"]
-    with pytest.raises(ValueError, match="not copied"):
+    paraphrased = validate_adjudication_result(
+        {
+            "selected": ["C01"],
+            "evidence": {"C01": "这是模型根据题目概括的证据" * 10},
+            "context_insufficient": False,
+            "need_expand_recall": False,
+            "reason": "直接考查",
+        },
+        {"C01"},
+        question,
+    )
+    assert paraphrased["selected"] == ["C01"]
+    with pytest.raises(ValueError, match="exceeds 300"):
         validate_adjudication_result(
             {
                 "selected": ["C01"],
-                "evidence": {"C01": "这是模型自行改写的证据"},
+                "evidence": {"C01": "证" * 301},
                 "context_insufficient": False,
                 "need_expand_recall": False,
                 "reason": "直接考查",
@@ -291,6 +303,32 @@ def test_validate_result_requires_short_verbatim_evidence():
             {"C01"},
             question,
         )
+
+
+def test_comprehensive_prompt_distinguishes_empty_from_expand():
+    unit = {
+        "question_id": "root-1",
+        "root_question_id": "root-1",
+        "input_role": "whole_question_comprehensive",
+        "stem": "公共题干",
+        "sub_questions": [{"question_id": "child-1", "stem": "小题"}],
+    }
+    labels = {
+        "知识点@综合": {
+            "label_id": "知识点@综合",
+            "label_name": "综合",
+            "label_path": "知识点@综合",
+            "definition": "综合分析",
+            "core_concepts": "",
+            "assessment_scope": "",
+            "distinctions": "",
+        }
+    }
+    prompt, _, _ = build_adjudication_prompt(
+        unit, [{"label_id": "知识点@综合"}], labels
+    )
+    assert "不构成综合考查时need_expand_recall=false" in prompt
+    assert "正确综合Label缺失时才为true" in prompt
 
 
 def test_run_adjudication_materializes_and_resumes(tmp_path):
@@ -382,6 +420,7 @@ def test_run_adjudication_materializes_and_resumes(tmp_path):
     assert question_prediction["selected_labels"][0]["evidence_by_unit"][0][
         "question_id"
     ] == "child-1"
+    assert question_prediction["components_complete"] is True
 
     second = run_adjudication(
         units_path,
@@ -524,3 +563,92 @@ def test_question_predictions_union_subquestion_region_and_comprehensive_labels(
         "知识点@珠江三角洲地区",
         "知识点@交通综合",
     ]
+
+
+def test_question_predictions_marks_missing_component_as_not_trainable(tmp_path):
+    prediction = {
+        "root_question_id": "root-1",
+        "unit_key": "root-1|child-1|subquestion",
+        "question_id": "child-1",
+        "input_role": "subquestion",
+        "selected_labels": [
+            {
+                "label_id": "知识点@甲",
+                "label_path": "知识点@甲",
+                "label_name": "甲",
+                "prompt_position": 1,
+                "evidence": "证据",
+            }
+        ],
+        "none_of_candidates": False,
+        "need_expand_recall": False,
+        "context_insufficient": False,
+        "needs_review": False,
+        "model": "test-model",
+        "prompt_version": "test-prompt",
+    }
+    expected_units = [
+        {
+            "question_id": "root-1",
+            "root_question_id": "root-1",
+            "input_role": "whole_question_comprehensive",
+        },
+        {
+            "question_id": "child-1",
+            "root_question_id": "root-1",
+            "input_role": "subquestion",
+        },
+    ]
+
+    summary = write_question_predictions(
+        tmp_path / "questions.jsonl",
+        [prediction],
+        expected_units=expected_units,
+        model="test-model",
+    )
+    record = json.loads(
+        (tmp_path / "questions.jsonl").read_text(encoding="utf-8").strip()
+    )
+
+    assert summary["whole_questions"] == 1
+    assert summary["whole_questions_with_incomplete_components"] == 1
+    assert record["expected_component_count"] == 2
+    assert record["completed_component_count"] == 1
+    assert record["components_complete"] is False
+    assert record["usable_for_training"] is False
+    assert record["missing_component_units"] == [
+        {
+            "unit_key": "root-1|root-1|whole_question_comprehensive",
+            "question_id": "root-1",
+            "input_role": "whole_question_comprehensive",
+        }
+    ]
+
+
+def test_question_predictions_keeps_root_when_every_component_failed(tmp_path):
+    expected_units = [
+        {
+            "question_id": "root-1",
+            "root_question_id": "root-1",
+            "input_role": "root",
+        }
+    ]
+
+    summary = write_question_predictions(
+        tmp_path / "questions.jsonl",
+        [],
+        expected_units=expected_units,
+        model="test-model",
+    )
+    record = json.loads(
+        (tmp_path / "questions.jsonl").read_text(encoding="utf-8").strip()
+    )
+
+    assert summary["whole_questions"] == 1
+    assert summary["whole_questions_with_incomplete_components"] == 1
+    assert record["selected_labels"] == []
+    assert record["completed_component_count"] == 0
+    assert record["components_complete"] is False
+    assert record["needs_review"] is True
+    assert record["usable_for_training"] is False
+    assert record["model"] == "test-model"

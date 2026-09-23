@@ -182,6 +182,7 @@ combined_candidates[].label_path
 - 只有多个小题或同一小题中的知识必须跨模块联动、共同形成不可拆分的判断时才选择
 - 仅仅因为大题包含多个独立知识点，不选择综合标签
 - 综合专项不得补选普通标签或区域标签
+- 不构成综合考查时返回空选且 `need_expand_recall=false`；只有确实存在综合考查、但正确综合标签不在候选中时才要求扩召
 
 ## 🤖 五、DS 调用与输出校验
 
@@ -210,7 +211,10 @@ combined_candidates[].label_path
 - 标签是否来自当前候选集合
 - 临时候选短码是否能映射回当前候选路径
 - `none_of_candidates`、`need_expand_recall`、`context_insufficient` 和 `needs_review` 是否为布尔值
-- 标签 evidence 是否为空或与题目无关
+- 每个选中标签的 evidence 是否存在、非空且不超过300字
+
+Prompt仍要求 evidence 尽量逐字引用题目且不超过60字，用于约束模型输出；程序硬校验与
+生物版保持一致，不因概括表达、标点差异或超过60字但未超过300字而丢弃整条标签结果。
 
 校验失败会记录错误并按配置重试，不直接写入可训练结果。
 
@@ -238,6 +242,9 @@ DS 当前不能直接查看原始图片。若题目依赖图片且没有足够�
 | `run.log` | 启动/续跑信息、逐单元进度、错误原因和最终汇总 |
 
 整题汇总时，对同一 `root_question_id` 的结果去重并取并集：
+
+程序还会比较预期打标单元与实际成功单元。任一小题或综合专项缺失时，记录缺失单元、
+设置 `components_complete=false`，并禁止该整题进入训练。
 
 ```mermaid
 flowchart TB
@@ -320,7 +327,7 @@ PYTHONPATH=src .venv/bin/python -m bio_geo_tagging.run_candidate_adjudication \
   --candidates runs/tagging/geography-stage1-final-candidates-1826.jsonl \
   --labels data/taxonomy/geography-existing-definitions.jsonl \
   --audited-exclusions configs/geography_adjudication_audited_exclusions.json \
-  --run-dir runs/tagging/geography-adjudication-smoke-100-v1.4 \
+  --run-dir runs/tagging/geography-adjudication-smoke-100-v1.5 \
   --endpoint http://172.22.0.35:9204/v1/chat/completions \
   --model DeepSeek-V4-Flash \
   --disable-thinking \
@@ -338,7 +345,7 @@ PYTHONPATH=src .venv/bin/python -m bio_geo_tagging.run_candidate_adjudication \
 冒烟结果确认后，删除 `--limit 100`，并使用新的 `--run-dir`，例如：
 
 ```bash
---run-dir runs/tagging/geography-adjudication-full-v1.4
+--run-dir runs/tagging/geography-adjudication-full-v1.5
 ```
 
 ## 🧭 九、当前边界与后续工作

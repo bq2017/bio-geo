@@ -16,7 +16,7 @@ from typing import Any, Iterable
 from bio_geo_tagging.ds import DSRequestError, append_evidence, parse_json_content
 
 
-PROMPT_VERSION = "geography-candidate-adjudication-v1.4-no-retrieval-leakage"
+PROMPT_VERSION = "geography-candidate-adjudication-v1.5-complete-units"
 CANDIDATE_ORDER_VERSION = "geography-candidate-order-v2"
 IMAGE_REFERENCE_RE = re.compile(r"(?:读图|据图|下图|上图|图中|该图|如图|示意图|图示)")
 
@@ -461,7 +461,7 @@ def build_adjudication_prompt(
         unit, candidates, labels_by_id
     )
     if question["unit_type"] == "whole_question_comprehensive":
-        scope_instruction = """本次是整道大题的综合Label专项判定。你可以阅读公共题干和全部小题，但候选中只提供综合Label。只有多个小题或同一小题中的知识必须跨模块联动、共同形成一个不可拆分的综合判断，并且符合综合Label定义时才选择。仅仅因为整道题包含多个独立知识点、多个小题或同一章节内容，不得选择综合Label。"""
+        scope_instruction = """本次是整道大题的综合Label专项判定。你可以阅读公共题干和全部小题，但候选中只提供综合Label。只有多个小题或同一小题中的知识必须跨模块联动、共同形成一个不可拆分的综合判断，并且符合综合Label定义时才选择。仅仅因为整道题包含多个独立知识点、多个小题或同一章节内容，不得选择综合Label。若题目只考查普通Label或区域Label、不构成综合考查，即使存在明确地理考点，也必须返回selected=[]、need_expand_recall=false。只有题目确实形成综合考查、但正确的综合Label不在候选中时，才返回selected=[]、need_expand_recall=true。"""
     elif question["unit_type"] == "root":
         scope_instruction = """本次判断一道不含小题的完整普通题。可以从候选中选择直接考查的普通Label、区域Label或综合Label，但每个Label都必须独立支持答案中的关键判断。区域仅作为材料发生地时不选区域Label；仅仅涉及多个知识点但不要求联动时不选综合Label。"""
     else:
@@ -503,7 +503,7 @@ Label有效范围由label_name、label_path、definition、assessment_scope和di
 
 七、状态判断
 轻微错别字或OCR异常若可由答案、解析和其他信息唯一消除，context_insufficient=false。DS无法查看图片或图片URL；题目明确依赖图片且没有可靠的文字图片描述时，必须设context_insufficient=true，不得根据答案或解析反推图片内容。其他缺父题或信息冲突导致连一个可靠Label都无法确定时，也设context_insufficient=true。
-若当前题目有明确高中地理考点，但所有候选都无法成立：selected=[]、need_expand_recall=true。若已有可靠Label，只是怀疑存在不确定次要Label，保留可靠结果且need_expand_recall=false。非有效高中地理考查：selected=[]、need_expand_recall=false、context_insufficient=false。
+普通题或小题若有明确高中地理考点、但所有候选都无法成立：selected=[]、need_expand_recall=true。整题综合专项严格遵循前述专项规则：不构成综合考查时need_expand_recall=false，确实构成综合考查但正确综合Label缺失时才为true。若已有可靠Label，只是怀疑存在不确定次要Label，保留可靠结果且need_expand_recall=false。非有效高中地理考查：selected=[]、need_expand_recall=false、context_insufficient=false。
 
 只能返回C01等短代码，不能抄写label_path。
 
@@ -525,10 +525,6 @@ Label有效范围由label_name、label_path、definition、assessment_scope和di
 }}
 不要输出Markdown或JSON之外的内容。"""
     return prompt, code_map, question
-
-
-def _normalize_evidence_text(value: str) -> str:
-    return re.sub(r"\s+", "", value)
 
 
 def validate_adjudication_result(
@@ -576,31 +572,14 @@ def validate_adjudication_result(
     raw_evidence = value["evidence"]
     if not isinstance(raw_evidence, dict):
         raise ValueError("evidence must be an object keyed by selected code")
-    source_text = _normalize_evidence_text(
-        "\n".join(
-            _as_text(question.get(field))
-            for field in (
-                "parent_stem",
-                "stem",
-                "options",
-                "answer_text",
-                "analysis",
-                "image_description",
-                "parent_image_description",
-                "sub_questions",
-            )
-        )
-    )
     normalized_evidence: dict[str, str] = {}
     for code in normalized:
         evidence = raw_evidence.get(code)
         if not isinstance(evidence, str) or not evidence.strip():
             raise ValueError(f"missing non-empty evidence for {code}")
         evidence = evidence.strip()
-        if len(evidence) > 60:
-            raise ValueError(f"evidence for {code} exceeds 60 characters")
-        if _normalize_evidence_text(evidence) not in source_text:
-            raise ValueError(f"evidence for {code} is not copied from question text")
+        if len(evidence) > 300:
+            raise ValueError(f"evidence for {code} exceeds 300 characters")
         normalized_evidence[code] = evidence
 
     return {
@@ -636,23 +615,48 @@ def _latest_success(
 
 
 def write_question_predictions(
-    path: Path, predictions: list[dict[str, Any]]
+    path: Path,
+    predictions: list[dict[str, Any]],
+    *,
+    expected_units: list[dict[str, Any]] | None = None,
+    model: str = "",
 ) -> dict[str, int]:
     """Union sub-question labels with the whole-question comprehensive decision."""
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    root_order: list[str] = []
+    prediction_root_order: list[str] = []
     for prediction in predictions:
         root_question_id = _as_text(prediction.get("root_question_id"))
         if root_question_id not in grouped:
-            root_order.append(root_question_id)
+            prediction_root_order.append(root_question_id)
         grouped[root_question_id].append(prediction)
+
+    expected_by_root: dict[str, list[dict[str, str]]] = defaultdict(list)
+    if expected_units is not None:
+        for unit in expected_units:
+            question_id = _as_text(unit.get("question_id"))
+            root_question_id = _as_text(
+                unit.get("root_question_id") or unit.get("parent_id") or question_id
+            )
+            expected_by_root[root_question_id].append(
+                {
+                    "unit_key": make_unit_key(unit),
+                    "question_id": question_id,
+                    "input_role": _as_text(
+                        unit.get("input_role") or unit.get("unit_type") or "root"
+                    ),
+                }
+            )
+        root_order = list(expected_by_root)
+    else:
+        root_order = prediction_root_order
 
     temporary = path.with_name(f".{path.name}.tmp")
     usable_count = 0
     review_count = 0
+    incomplete_count = 0
     with temporary.open("w", encoding="utf-8", newline="\n") as output:
         for root_question_id in root_order:
-            components = grouped[root_question_id]
+            components = grouped.get(root_question_id, [])
             selected_by_id: dict[str, dict[str, Any]] = {}
             for component in components:
                 for selected in component["selected_labels"]:
@@ -679,10 +683,31 @@ def write_question_predictions(
                     label["label_id"],
                 ),
             )
-            needs_review = any(component["needs_review"] for component in components)
+            completed_unit_keys = {component["unit_key"] for component in components}
+            expected_components = expected_by_root.get(root_question_id)
+            if expected_components is None:
+                expected_components = [
+                    {
+                        "unit_key": component["unit_key"],
+                        "question_id": component["question_id"],
+                        "input_role": component["input_role"],
+                    }
+                    for component in components
+                ]
+            missing_components = [
+                component
+                for component in expected_components
+                if component["unit_key"] not in completed_unit_keys
+            ]
+            components_complete = not missing_components
+            needs_review = bool(
+                not components_complete
+                or any(component["needs_review"] for component in components)
+            )
             usable_for_training = bool(selected_labels and not needs_review)
             usable_count += int(usable_for_training)
             review_count += int(needs_review)
+            incomplete_count += int(not components_complete)
             record = {
                 "root_question_id": root_question_id,
                 "selected_labels": selected_labels,
@@ -697,10 +722,16 @@ def write_question_predictions(
                     }
                     for component in components
                 ],
+                "expected_component_count": len(expected_components),
+                "completed_component_count": len(completed_unit_keys),
+                "components_complete": components_complete,
+                "missing_component_units": missing_components,
                 "needs_review": needs_review,
                 "usable_for_training": usable_for_training,
-                "model": components[0]["model"],
-                "prompt_version": components[0]["prompt_version"],
+                "model": components[0]["model"] if components else model,
+                "prompt_version": (
+                    components[0]["prompt_version"] if components else PROMPT_VERSION
+                ),
             }
             output.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
     temporary.replace(path)
@@ -708,6 +739,7 @@ def write_question_predictions(
         "whole_questions": len(root_order),
         "whole_questions_usable_for_training": usable_count,
         "whole_questions_needing_review": review_count,
+        "whole_questions_with_incomplete_components": incomplete_count,
     }
 
 
@@ -1042,7 +1074,10 @@ def run_adjudication(
             output.write(json.dumps(prediction, ensure_ascii=False, sort_keys=True) + "\n")
     predictions_temporary.replace(predictions_path)
     question_prediction_summary = write_question_predictions(
-        output_dir / "question_predictions.jsonl", materialized_predictions
+        output_dir / "question_predictions.jsonl",
+        materialized_predictions,
+        expected_units=units,
+        model=model,
     )
 
     success = len(completed)
