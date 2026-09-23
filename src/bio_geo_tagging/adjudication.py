@@ -943,7 +943,6 @@ def run_adjudication(
         if record["error"]:
             progress_message += f" error={record['error']}"
         _append_run_log(run_log_path, progress_message)
-        print(progress_message, flush=True)
 
     if workers == 1:
         for finished, item in enumerate(map(adjudicate, pending_units), 1):

@@ -331,7 +331,7 @@ def test_comprehensive_prompt_distinguishes_empty_from_expand():
     assert "正确综合Label缺失时才为true" in prompt
 
 
-def test_run_adjudication_materializes_and_resumes(tmp_path):
+def test_run_adjudication_materializes_and_resumes(tmp_path, capsys):
     units_path = tmp_path / "units.jsonl"
     candidates_path = tmp_path / "candidates.jsonl"
     labels_path = tmp_path / "labels.jsonl"
@@ -401,6 +401,7 @@ def test_run_adjudication_materializes_and_resumes(tmp_path):
     assert report["success"] == 1
     assert report["usable_for_training"] == 1
     assert client.calls == 1
+    assert capsys.readouterr().out == ""
     prediction = json.loads(
         (run_dir / "predictions.jsonl").read_text(encoding="utf-8").strip()
     )
@@ -436,6 +437,7 @@ def test_run_adjudication_materializes_and_resumes(tmp_path):
     assert second["success"] == 1
     assert second["requests_succeeded"] == 0
     assert client.calls == 1
+    assert capsys.readouterr().out == ""
     resumed_log = (run_dir / "run.log").read_text(encoding="utf-8")
     assert "START input=1 resumed=1 pending=0" in resumed_log
 

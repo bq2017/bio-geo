@@ -191,31 +191,34 @@ PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication \
 
 输出目录包含 `evidence.jsonl`、`predictions.jsonl`、`report.json`、
 `question_predictions.jsonl`、`run_manifest.json` 和 `run.log`。`run.log`会追加记录
-每次启动、逐单元`OK/ERROR`进度、错误原因和最终汇总，可用`tail -f`实时查看。
+每次启动、逐单元`OK/ERROR`进度、错误原因和最终汇总，可用`tail -f`实时查看；
+逐单元进度不再重复打印到终端，终端只显示启动信息和最终摘要。
 `predictions.jsonl`是逐小题/逐综合专项结果，`question_predictions.jsonl`是整道题最终并集。
 整题结果同时记录 `expected_component_count`、`completed_component_count`、
 `components_complete` 和 `missing_component_units`；任一预期单元未成功时，整题不可训练。
 输入文件、模型、Prompt或限制发生变化时，必须使用新的运行目录。
 `--limit`按整道题计数；大题的综合专项和全部小题不会被拆开截断。
 
-打标完成后可离线对比第一阶段文件中的现有 `knw_labels`。评测程序不会调用DS，
-也不会把金标加入Prompt：
+打标完成后可离线生成自动诊断。程序不会调用DS，也不会把现有标签加入Prompt：
 
 ```bash
 PYTHONPATH=src python -m bio_geo_tagging.adjudication_evaluation \
   --run-dir runs/tagging/geography-adjudication-smoke-100-v1.5 \
-  --gold-candidates runs/tagging/geography-stage1-final-candidates-1826.jsonl \
+  --legacy-candidates runs/tagging/geography-stage1-final-candidates-1826.jsonl \
   --labels data/taxonomy/geography-existing-definitions.jsonl
 ```
 
-输出 `evaluation.json` 和 `evaluation_details.jsonl`。前者包含已完成整题的多标签
-micro Precision、Recall、F1、整题完全匹配率，以及仅针对
-`usable_for_training=true` 整题的同组指标；后者逐题列出命中、多选和漏选标签。
+输出 `evaluation.json`、`evaluation_details.jsonl` 和 `final_labels.jsonl`。诊断按
+`final_labels = legacy_labels ∪ ds_added_labels` 计算最终标签，重点报告DS新增规模、
+普通/区域/综合标签分布、层级冗余、evidence结构校验和自动风险标记。
+`final_labels.jsonl`可直接供下游使用，并分别保留旧标签、DS新增标签和最终并集。
+原有Precision、Recall、F1和完全匹配率保留在`legacy_label_agreement`中，
+仅表示DS与现有标签的一致程度，不表示新增标签的语义准确率。
 缺少任一预期组件的整题只计入 `incomplete_question_predictions` 和
-`attempted_questions_without_complete_prediction`，不进入标签准确率，避免把运行失败
-误算成模型漏标。
-这些指标衡量与现有 `knw_labels` 的一致性；若旧标签本身不完整，多选项仍需人工复核，
-不能直接视为DS错误。
+`attempted_questions_without_complete_prediction`，不进入自动诊断统计。
+未进行人工新增标签裁决时，`semantic_addition_accuracy_available=false`，不得把自动诊断
+表述为准确率。需要比较两次独立运行的稳定性时，可增加
+`--stability-run-dir <另一运行目录>`。
 
 ## 原标签与原释义匹配评分
 

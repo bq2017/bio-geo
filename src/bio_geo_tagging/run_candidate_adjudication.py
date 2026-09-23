@@ -79,6 +79,18 @@ def main() -> int:
         request_interval=args.request_interval,
         enable_thinking=args.enable_thinking,
     )
+    print(
+        json.dumps(
+            {
+                "status": "started",
+                "run_dir": str(run_dir),
+                "model": args.model,
+                "workers": args.workers,
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
     report = run_adjudication(
         args.units,
         args.candidates,
