@@ -43,6 +43,12 @@ def _write_json_atomic(path: Path, value: Any) -> None:
     temporary.replace(path)
 
 
+def _append_run_log(path: Path, message: str) -> None:
+    timestamp = datetime.now(timezone.utc).isoformat()
+    with path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(f"{timestamp} {message}\n")
+
+
 def _file_sha256(path: str | Path) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
@@ -794,6 +800,13 @@ def run_adjudication(
         for index, unit in enumerate(units, 1)
         if make_unit_key(unit) not in completed
     ]
+    run_log_path = output_dir / "run.log"
+    _append_run_log(
+        run_log_path,
+        "START "
+        f"input={len(units)} resumed={len(completed)} pending={len(pending_units)} "
+        f"workers={workers} model={model} prompt_version={PROMPT_VERSION}",
+    )
     requests_succeeded = 0
     requests_failed = 0
 
@@ -891,11 +904,14 @@ def run_adjudication(
             "prompt_version": PROMPT_VERSION,
         }
         _write_json_atomic(output_dir / "report.json", interim)
-        print(
+        progress_message = (
             f"[{finished}/{len(pending_units)}; source={original_index}/{len(units)}] "
-            f"{unit_key} {'ERROR' if record['error'] else 'OK'}",
-            flush=True,
+            f"{unit_key} {'ERROR' if record['error'] else 'OK'}"
         )
+        if record["error"]:
+            progress_message += f" error={record['error']}"
+        _append_run_log(run_log_path, progress_message)
+        print(progress_message, flush=True)
 
     if workers == 1:
         for finished, item in enumerate(map(adjudicate, pending_units), 1):
@@ -1102,4 +1118,10 @@ def run_adjudication(
         **question_prediction_summary,
     }
     _write_json_atomic(output_dir / "report.json", report)
+    _append_run_log(
+        run_log_path,
+        "END "
+        f"success={report['success']} error={report['error']} "
+        f"pending={report['pending']} run_wall_seconds={report['run_wall_seconds']}",
+    )
     return report

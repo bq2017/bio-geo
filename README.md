@@ -195,7 +195,7 @@ PYTHONPATH=src python -m bio_geo_tagging.call1_candidate_retrieval \
 ```bash
 PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication \
   --units data/annotation/geography-high-score-valid-tagging-units-filtered-v2.jsonl \
-  --candidates runs/tagging/geography-hybrid-region-text-v4-filtered-v2-1826.jsonl \
+  --candidates runs/tagging/geography-stage1-final-candidates-1826.jsonl \
   --labels data/taxonomy/geography-existing-definitions.jsonl \
   --audited-exclusions configs/geography_adjudication_audited_exclusions.json \
   --run-dir runs/tagging/geography-adjudication-smoke-50-v1.4 \
@@ -212,7 +212,8 @@ PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication \
 ```
 
 输出目录包含 `evidence.jsonl`、`predictions.jsonl`、`report.json`、
-`question_predictions.jsonl` 和 `run_manifest.json`。
+`question_predictions.jsonl`、`run_manifest.json` 和 `run.log`。`run.log`会追加记录
+每次启动、逐单元`OK/ERROR`进度、错误原因和最终汇总，可用`tail -f`实时查看。
 `predictions.jsonl`是逐小题/逐综合专项结果，`question_predictions.jsonl`是整道题最终并集。
 输入文件、模型、Prompt或限制发生变化时，必须使用新的运行目录。
 `--limit`按整道题计数；大题的综合专项和全部小题不会被拆开截断。

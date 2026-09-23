@@ -80,7 +80,7 @@ root_question_id = R
 当前使用的候选文件为：
 
 ```text
-/home/fuxinzhou/bio-geo/runs/tagging/geography-hybrid-region-text-v4-filtered-v2-1826.jsonl
+/home/fuxinzhou/bio-geo/runs/tagging/geography-stage1-final-candidates-1826.jsonl
 ```
 
 每行是一道完整题目的候选记录，核心结构如下：
@@ -235,6 +235,7 @@ DS 当前不能直接查看原始图片。若题目依赖图片且没有足够�
 | `question_predictions.jsonl` | 按根题合并后的最终标签 |
 | `report.json` | 数量、错误、过滤和训练可用性统计 |
 | `run_manifest.json` | 输入、模型、Prompt 和运行参数快照 |
+| `run.log` | 启动/续跑信息、逐单元进度、错误原因和最终汇总 |
 
 整题汇总时，对同一 `root_question_id` 的结果去重并取并集：
 
@@ -316,7 +317,7 @@ PYTHONPATH=src .venv/bin/python -m bio_geo_tagging.question_tagging_units \
 ```bash
 PYTHONPATH=src .venv/bin/python -m bio_geo_tagging.run_candidate_adjudication \
   --units data/annotation/geography-high-score-valid-tagging-units-filtered-v2.jsonl \
-  --candidates runs/tagging/geography-hybrid-region-text-v4-filtered-v2-1826.jsonl \
+  --candidates runs/tagging/geography-stage1-final-candidates-1826.jsonl \
   --labels data/taxonomy/geography-existing-definitions.jsonl \
   --audited-exclusions configs/geography_adjudication_audited_exclusions.json \
   --run-dir runs/tagging/geography-adjudication-smoke-100-v1.4 \
@@ -362,4 +363,4 @@ PYTHONPATH=src .venv/bin/python -m bio_geo_tagging.run_candidate_adjudication \
 | 大题/小题单元展开 | `src/bio_geo_tagging/question_tagging_units.py` |
 | 地理标签释义 | `data/taxonomy/geography-existing-definitions.jsonl` |
 | 人工硬排除 | `configs/geography_adjudication_audited_exclusions.json` |
-| 第一阶段候选 | `runs/tagging/geography-hybrid-region-text-v4-filtered-v2-1826.jsonl` |
+| 第一阶段候选 | `runs/tagging/geography-stage1-final-candidates-1826.jsonl` |

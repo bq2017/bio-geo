@@ -371,6 +371,10 @@ def test_run_adjudication_materializes_and_resumes(tmp_path):
     assert "bm25_rank" not in prediction["selected_labels"][0]
     assert "sources" not in prediction["selected_labels"][0]
     assert prediction["root_question_id"] == "root-1"
+    run_log = (run_dir / "run.log").read_text(encoding="utf-8")
+    assert "START input=1 resumed=0 pending=1" in run_log
+    assert "[1/1; source=1/1] root-1|child-1|subquestion OK" in run_log
+    assert "END success=1 error=0 pending=0" in run_log
     question_prediction = json.loads(
         (run_dir / "question_predictions.jsonl").read_text(encoding="utf-8").strip()
     )
@@ -393,6 +397,8 @@ def test_run_adjudication_materializes_and_resumes(tmp_path):
     assert second["success"] == 1
     assert second["requests_succeeded"] == 0
     assert client.calls == 1
+    resumed_log = (run_dir / "run.log").read_text(encoding="utf-8")
+    assert "START input=1 resumed=1 pending=0" in resumed_log
 
 
 def test_audited_exclusion_removes_selected_label(tmp_path):
