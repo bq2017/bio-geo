@@ -17,9 +17,13 @@ from bio_geo_tagging.ds import DSRequestError, append_evidence, parse_json_conte
 
 
 PROMPT_VERSION = "geography-candidate-adjudication-v1.5-complete-units"
-VISION_PROMPT_VERSION = "geography-candidate-adjudication-v1.5-vision-v1"
+VISION_PROMPT_VERSION = (
+    "geography-candidate-adjudication-v1.5-vision-v2-image-reference-triggered"
+)
 CANDIDATE_ORDER_VERSION = "geography-candidate-order-v2"
-IMAGE_REFERENCE_RE = re.compile(r"(?:读图|据图|下图|上图|图中|该图|如图|示意图|图示)")
+IMAGE_REFERENCE_RE = re.compile(
+    r"(?:读图|据图|下图|上图|图中|该图|如图|示意图|图示|图\s*\d+|图[甲乙丙丁])"
+)
 
 
 def _read_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -331,8 +335,31 @@ def apply_audited_exclusions(
     return kept, removed, exclude_training
 
 
+def _unit_references_image(unit: dict[str, Any]) -> bool:
+    sub_questions = unit.get("sub_questions")
+    valid_sub_questions = (
+        [value for value in sub_questions if isinstance(value, dict)]
+        if isinstance(sub_questions, list)
+        else []
+    )
+    text = "\n".join(
+        [
+            _as_text(unit.get("context_stem") or unit.get("parent_stem")),
+            _as_text(unit.get("stem")),
+            _as_text(unit.get("options")),
+            *(
+                _as_text(value.get("stem")) + "\n" + _as_text(value.get("options"))
+                for value in valid_sub_questions
+            ),
+        ]
+    )
+    return bool(IMAGE_REFERENCE_RE.search(text))
+
+
 def image_inputs_for_unit(unit: dict[str, Any]) -> list[dict[str, str]]:
     """Return labeled image URLs needed by this adjudication unit."""
+    if not _unit_references_image(unit):
+        return []
     values: list[tuple[str, Any]] = []
     input_role = _as_text(unit.get("input_role") or unit.get("unit_type"))
     if input_role == "subquestion":
@@ -376,25 +403,14 @@ def _image_context_missing(
     flags = unit.get("flags") if isinstance(unit.get("flags"), dict) else {}
     if flags.get("image_context_missing") is not None:
         return bool(flags["image_context_missing"])
+    if not _unit_references_image(unit):
+        return False
     sub_questions = unit.get("sub_questions")
     valid_sub_questions = (
         [value for value in sub_questions if isinstance(value, dict)]
         if isinstance(sub_questions, list)
         else []
     )
-    text = "\n".join(
-        [
-            _as_text(unit.get("context_stem") or unit.get("parent_stem")),
-            _as_text(unit.get("stem")),
-            _as_text(unit.get("options")),
-            *(
-                _as_text(value.get("stem")) + "\n" + _as_text(value.get("options"))
-                for value in valid_sub_questions
-            ),
-        ]
-    )
-    if not IMAGE_REFERENCE_RE.search(text):
-        return False
     descriptions = [
         _as_text(unit.get("image_description")),
         _as_text(unit.get("context_image_description")),
@@ -963,10 +979,10 @@ def run_adjudication(
         unit_key = make_unit_key(unit)
         question_id = _as_text(unit.get("question_id"))
         candidates = candidates_by_unit[unit_key]
-        prompt, code_map, question = build_adjudication_prompt(
-            unit, candidates, labels_by_id, vision_enabled=enable_vision
-        )
         images = image_inputs_for_unit(unit) if enable_vision else []
+        prompt, code_map, question = build_adjudication_prompt(
+            unit, candidates, labels_by_id, vision_enabled=bool(images)
+        )
         record: dict[str, Any] = {
             "stage": "geography_candidate_adjudication",
             "prompt_version": prompt_version,
@@ -979,6 +995,7 @@ def run_adjudication(
             "model": model,
             "temperature": temperature,
             "vision_enabled": enable_vision,
+            "image_triggered": bool(images),
             "image_count": len(images),
             "image_urls": [image["url"] for image in images],
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -1264,6 +1281,9 @@ def run_adjudication(
         "model": model,
         "temperature": temperature,
         "vision_enabled": enable_vision,
+        "image_triggered_units": sum(
+            bool(record.get("image_triggered")) for record in completed.values()
+        ),
         "prompt_version": prompt_version,
         **question_prediction_summary,
     }

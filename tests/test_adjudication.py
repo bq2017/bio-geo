@@ -48,6 +48,7 @@ class FakeClient:
 def test_multimodal_messages_include_parent_and_current_images():
     unit = {
         "input_role": "subquestion",
+        "context_stem": "如图所示，判断甲乙两地差异",
         "context_stem_image_url": "https://example.test/parent.png",
         "stem_image_url": "https://example.test/child.png",
         "analysis_image_url": "https://example.test/child-analysis.png",
@@ -78,6 +79,31 @@ def test_multimodal_messages_include_parent_and_current_images():
             "type": "image_url",
             "image_url": {"url": "https://example.test/child-analysis.png"},
         },
+    ]
+
+
+def test_image_urls_are_not_sent_without_an_explicit_image_reference():
+    assert image_inputs_for_unit(
+        {
+            "input_role": "root",
+            "stem": "判断甲乙两地气温差异",
+            "stem_image_url": "https://example.test/full-question.png",
+        }
+    ) == []
+
+
+@pytest.mark.parametrize("reference", ["读图回答", "如图所示", "图4示意位置"])
+def test_common_image_references_trigger_image_input(reference):
+    images = image_inputs_for_unit(
+        {
+            "input_role": "root",
+            "stem": reference,
+            "stem_image_url": "https://example.test/full-question.png",
+        }
+    )
+
+    assert images == [
+        {"label": "当前题干图", "url": "https://example.test/full-question.png"}
     ]
 
 
