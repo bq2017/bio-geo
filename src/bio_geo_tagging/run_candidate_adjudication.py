@@ -17,6 +17,7 @@ def parse_args(
     *,
     description: str = __doc__,
     default_model: str = "DeepSeek-V4-Flash",
+    default_temperature: float = 0.0,
 ) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--units", type=Path, required=True)
@@ -37,6 +38,7 @@ def parse_args(
         help="minimum seconds between HTTP attempt starts across all workers",
     )
     parser.add_argument("--max-tokens", type=int, default=1024)
+    parser.add_argument("--temperature", type=float, default=default_temperature)
     parser.add_argument("--workers", type=int, default=1)
     thinking = parser.add_mutually_exclusive_group()
     thinking.add_argument(
@@ -66,6 +68,8 @@ def main(
     default_model: str = "DeepSeek-V4-Flash",
     model_environment_names: tuple[str, ...] = ("MODEL",),
     endpoint_environment_names: tuple[str, ...] = ("DS1", "DS2"),
+    default_endpoints: tuple[str, ...] = (),
+    default_temperature: float = 0.0,
     default_run_suffix: str = "geography-candidate-adjudication-ds",
 ) -> int:
     resolved_default_model = (
@@ -75,12 +79,13 @@ def main(
         argv,
         description=f"Run geography candidate adjudication with the {profile} profile.",
         default_model=resolved_default_model,
+        default_temperature=default_temperature,
     )
     endpoints = args.endpoints or [
         value
         for name in endpoint_environment_names
         if (value := os.getenv(name))
-    ]
+    ] or list(default_endpoints)
     if not endpoints:
         environment_hint = "/".join(endpoint_environment_names)
         raise SystemExit(f"provide --endpoint or set {environment_hint}")
@@ -94,6 +99,8 @@ def main(
         raise SystemExit("--request-interval must be non-negative")
     if args.max_tokens < 1:
         raise SystemExit("--max-tokens must be positive")
+    if args.temperature < 0:
+        raise SystemExit("--temperature must be non-negative")
     run_dir = args.run_dir or Path("runs") / datetime.now().strftime(
         f"%Y%m%d-%H%M%S-{default_run_suffix}"
     )
@@ -105,6 +112,7 @@ def main(
         retry_delay=args.retry_delay,
         request_interval=args.request_interval,
         enable_thinking=args.enable_thinking,
+        temperature=args.temperature,
     )
     print(
         json.dumps(
@@ -113,6 +121,7 @@ def main(
                 "run_dir": str(run_dir),
                 "profile": profile,
                 "model": args.model,
+                "temperature": args.temperature,
                 "workers": args.workers,
             },
             ensure_ascii=False,
@@ -131,6 +140,7 @@ def main(
         workers=args.workers,
         audited_exclusions_path=args.audited_exclusions,
         enable_thinking=args.enable_thinking,
+        temperature=args.temperature,
     )
     print(json.dumps({"run_dir": str(run_dir), **report}, ensure_ascii=False))
     return 0 if report["success"] == report["input"] and report["error"] == 0 else 1

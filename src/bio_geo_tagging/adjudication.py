@@ -60,6 +60,8 @@ def _file_sha256(path: str | Path) -> str:
 def _ensure_run_manifest(path: Path, manifest: dict[str, Any]) -> None:
     if path.exists():
         existing = json.loads(path.read_text(encoding="utf-8"))
+        if "temperature" not in existing and manifest.get("temperature") == 0:
+            existing["temperature"] = 0
         if existing != manifest:
             raise ValueError("run manifest mismatch; use a new run directory")
         return
@@ -756,6 +758,7 @@ def run_adjudication(
     workers: int = 1,
     audited_exclusions_path: str | Path | None = None,
     enable_thinking: bool | None = None,
+    temperature: float = 0.0,
 ) -> dict[str, Any]:
     run_started = time.monotonic()
     run_started_at = datetime.now(timezone.utc).isoformat()
@@ -800,6 +803,7 @@ def run_adjudication(
         "model": model,
         "limit": limit,
         "max_tokens": max_tokens,
+        "temperature": temperature,
         "input_paths": {
             "units": str(Path(units_path)),
             "candidates": str(Path(candidates_path)),
@@ -860,6 +864,7 @@ def run_adjudication(
             "prompt_chars": len(prompt),
             "candidate_code_map": code_map,
             "model": model,
+            "temperature": temperature,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "raw_response": None,
             "parsed_response": None,
@@ -1148,6 +1153,7 @@ def run_adjudication(
         "input_sha256": manifest["input_sha256"],
         "candidate_count_distribution": candidate_count_distribution,
         "model": model,
+        "temperature": temperature,
         "prompt_version": PROMPT_VERSION,
         **question_prediction_summary,
     }

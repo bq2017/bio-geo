@@ -19,6 +19,7 @@ from bio_geo_tagging import run_candidate_adjudication_qwen as qwen_cli
                 "default_model": "DeepSeek-V4-Flash",
                 "model_environment_names": ("DEEPSEEK_MODEL",),
                 "endpoint_environment_names": ("DS1", "DS2"),
+                "default_temperature": 0.0,
                 "default_run_suffix": "geography-candidate-adjudication-ds",
             },
         ),
@@ -26,13 +27,17 @@ from bio_geo_tagging import run_candidate_adjudication_qwen as qwen_cli
             qwen_cli,
             {
                 "profile": "qwen",
-                "default_model": "Qwen3.8-27B",
+                "default_model": "qwen3.8-27b-fp8",
                 "model_environment_names": ("QWEN_MODEL",),
                 "endpoint_environment_names": (
                     "QWEN_LEGACY_ENDPOINT",
                     "QWEN1",
                     "QWEN2",
                 ),
+                "default_endpoints": (
+                    "http://172.22.0.35:9204/v1/chat/completions",
+                ),
+                "default_temperature": 0.6,
                 "default_run_suffix": "geography-candidate-adjudication-qwen",
             },
         ),
@@ -70,10 +75,8 @@ def test_qwen_profile_uses_qwen_environment_and_shared_adjudication(
         captured["run"] = {"args": args, "kwargs": kwargs}
         return {"input": 1, "success": 1, "error": 0}
 
-    monkeypatch.setenv(
-        "QWEN_LEGACY_ENDPOINT", "http://qwen.test/v1/chat/completions"
-    )
-    monkeypatch.setenv("QWEN_MODEL", "Qwen-test")
+    monkeypatch.delenv("QWEN_LEGACY_ENDPOINT", raising=False)
+    monkeypatch.delenv("QWEN_MODEL", raising=False)
     monkeypatch.setattr(cli, "DSClient", FakeClient)
     monkeypatch.setattr(cli, "run_adjudication", fake_run_adjudication)
 
@@ -94,24 +97,29 @@ def test_qwen_profile_uses_qwen_environment_and_shared_adjudication(
             "512",
         ],
         profile="qwen",
-        default_model="Qwen3.8-27B",
+        default_model="qwen3.8-27b-fp8",
         model_environment_names=("QWEN_MODEL",),
         endpoint_environment_names=("QWEN_LEGACY_ENDPOINT", "QWEN1", "QWEN2"),
+        default_endpoints=("http://172.22.0.35:9204/v1/chat/completions",),
+        default_temperature=0.6,
         default_run_suffix="geography-candidate-adjudication-qwen",
     )
 
     assert exit_code == 0
     assert captured["client"]["endpoints"] == [
-        "http://qwen.test/v1/chat/completions"
+        "http://172.22.0.35:9204/v1/chat/completions"
     ]
-    assert captured["client"]["model"] == "Qwen-test"
+    assert captured["client"]["model"] == "qwen3.8-27b-fp8"
     assert captured["client"]["enable_thinking"] is False
-    assert captured["run"]["kwargs"]["model"] == "Qwen-test"
+    assert captured["client"]["temperature"] == 0.6
+    assert captured["run"]["kwargs"]["model"] == "qwen3.8-27b-fp8"
+    assert captured["run"]["kwargs"]["temperature"] == 0.6
     assert captured["run"]["kwargs"]["workers"] == 3
     assert captured["run"]["kwargs"]["max_tokens"] == 512
     started = json.loads(capsys.readouterr().out.splitlines()[0])
     assert started["profile"] == "qwen"
-    assert started["model"] == "Qwen-test"
+    assert started["model"] == "qwen3.8-27b-fp8"
+    assert started["temperature"] == 0.6
 
 
 def test_profile_without_endpoint_names_the_expected_environment_variables(
@@ -134,7 +142,7 @@ def test_profile_without_endpoint_names_the_expected_environment_variables(
                 str(tmp_path / "labels.jsonl"),
             ],
             profile="qwen",
-            default_model="Qwen3.8-27B",
+            default_model="qwen3.8-27b-fp8",
             model_environment_names=("QWEN_MODEL",),
             endpoint_environment_names=(
                 "QWEN_LEGACY_ENDPOINT",

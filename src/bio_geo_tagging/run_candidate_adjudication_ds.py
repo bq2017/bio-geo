@@ -11,6 +11,7 @@ def main() -> int:
         default_model="DeepSeek-V4-Flash",
         model_environment_names=("DEEPSEEK_MODEL",),
         endpoint_environment_names=("DS1", "DS2"),
+        default_temperature=0.0,
         default_run_suffix="geography-candidate-adjudication-ds",
     )
 

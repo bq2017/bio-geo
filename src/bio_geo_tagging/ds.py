@@ -59,6 +59,7 @@ class DSClient:
         retry_delay: float = 0.25,
         request_interval: float = 0.0,
         enable_thinking: bool | None = None,
+        temperature: float = 0.0,
     ) -> None:
         self.endpoints = [endpoint.rstrip("/") for endpoint in endpoints if endpoint]
         if not self.endpoints:
@@ -67,12 +68,15 @@ class DSClient:
             raise ValueError("retries must be at least 1")
         if request_interval < 0:
             raise ValueError("request_interval must be non-negative")
+        if temperature < 0:
+            raise ValueError("temperature must be non-negative")
         self.model = model
         self.timeout = timeout
         self.retries = retries
         self.retry_delay = retry_delay
         self.request_interval = request_interval
         self.enable_thinking = enable_thinking
+        self.temperature = temperature
         self._next_endpoint = 0
         self._endpoint_lock = threading.Lock()
         self._request_slot_lock = threading.Lock()
@@ -107,7 +111,7 @@ class DSClient:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": 0,
+            "temperature": self.temperature,
             "max_tokens": max_tokens,
             "stream": False,
         }

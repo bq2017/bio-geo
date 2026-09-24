@@ -236,7 +236,7 @@ DeepSeek示例：
 ```bash
 PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication_ds \
   --units data/annotation/geography-high-score-valid-tagging-units-filtered-v2.jsonl \
-  --candidates runs/tagging/geography-stage1-final-candidates-1826.jsonl \
+  --candidates runs/tagging/geography-hybrid-region-text-v4-filtered-v2-1826.jsonl \
   --labels data/taxonomy/geography-existing-definitions.jsonl \
   --audited-exclusions configs/geography_adjudication_audited_exclusions.json \
   --run-dir runs/tagging/geography-adjudication-ds-smoke-50-v1.5 \
@@ -256,11 +256,13 @@ Qwen示例：
 ```bash
 PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication_qwen \
   --units data/annotation/geography-high-score-valid-tagging-units-filtered-v2.jsonl \
-  --candidates runs/tagging/geography-stage1-final-candidates-1826.jsonl \
+  --candidates runs/tagging/geography-hybrid-region-text-v4-filtered-v2-1826.jsonl \
   --labels data/taxonomy/geography-existing-definitions.jsonl \
   --audited-exclusions configs/geography_adjudication_audited_exclusions.json \
   --run-dir runs/tagging/geography-adjudication-qwen-smoke-50-v1.5 \
-  --endpoint "$QWEN_LEGACY_ENDPOINT" \
+  --endpoint http://172.22.0.35:9204/v1/chat/completions \
+  --model qwen3.8-27b-fp8 \
+  --temperature 0.6 \
   --disable-thinking \
   --limit 50 \
   --workers 10 \
@@ -271,12 +273,14 @@ PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication_qwen \
   --max-tokens 512
 ```
 
-两个入口分别默认使用`DeepSeek-V4-Flash`和`Qwen3.8-27B`。也可以不传
-`--endpoint`：DeepSeek入口读取`DS1`/`DS2`，Qwen入口读取
-`QWEN_LEGACY_ENDPOINT`/`QWEN1`/`QWEN2`。两版客户端均按生物版兼容协议发送
-OpenAI格式请求，使用`temperature=0`、`stream=false`；`--disable-thinking`会发送
+两个入口分别默认使用`DeepSeek-V4-Flash`和`qwen3.8-27b-fp8`。Qwen入口默认
+连接`http://172.22.0.35:9204/v1/chat/completions`，默认`temperature=0.6`；
+DeepSeek入口保持`temperature=0`。也可以传`--endpoint`或使用环境变量：DeepSeek
+读取`DS1`/`DS2`，Qwen读取`QWEN_LEGACY_ENDPOINT`/`QWEN1`/`QWEN2`。两版客户端
+均发送OpenAI格式请求和`stream=false`；`--disable-thinking`会发送
 `chat_template_kwargs.enable_thinking=false`。专用模型环境变量分别为
-`DEEPSEEK_MODEL`和`QWEN_MODEL`，也可以用`--model`显式覆盖。
+`DEEPSEEK_MODEL`和`QWEN_MODEL`，也可以用`--model`显式覆盖。实际温度会记录在
+`run_manifest.json`、`evidence.jsonl`和`report.json`中。
 
 输出目录包含 `evidence.jsonl`、`predictions.jsonl`、`report.json`、
 `question_predictions.jsonl`、`run_manifest.json` 和 `run.log`。`run.log`会追加记录

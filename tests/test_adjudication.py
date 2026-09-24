@@ -423,6 +423,14 @@ def test_run_adjudication_materializes_and_resumes(tmp_path, capsys):
     ] == "child-1"
     assert question_prediction["components_complete"] is True
 
+    # Runs created before temperature was recorded used the same default 0.
+    manifest_path = run_dir / "run_manifest.json"
+    legacy_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    legacy_manifest.pop("temperature")
+    manifest_path.write_text(
+        json.dumps(legacy_manifest, ensure_ascii=False), encoding="utf-8"
+    )
+
     second = run_adjudication(
         units_path,
         candidates_path,
