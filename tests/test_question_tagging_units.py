@@ -3,7 +3,7 @@ import json
 from bio_geo_tagging.question_tagging_units import expand_question, process_file
 
 
-def test_expand_question_propagates_only_parent_image_description():
+def test_expand_question_propagates_parent_image_context():
     units = list(
         expand_question(
             {
@@ -11,16 +11,30 @@ def test_expand_question_propagates_only_parent_image_description():
                 "stem": "公共题干",
                 "image_description": "等高线图，甲地海拔高于乙地",
                 "stem_image_url": "https://example.test/parent.png",
+                "analysis_image_url": "https://example.test/parent-analysis.png",
                 "sub_questions": [
-                    {"question_id": "child-1", "stem": "判断两地气温差异"}
+                    {
+                        "question_id": "child-1",
+                        "stem": "判断两地气温差异",
+                        "stem_image_url": "https://example.test/child.png",
+                    }
                 ],
             }
         )
     )
     assert units[0]["input_role"] == "whole_question_comprehensive"
     assert units[0]["sub_questions"][0]["question_id"] == "child-1"
+    assert (
+        units[0]["sub_questions"][0]["stem_image_url"]
+        == "https://example.test/child.png"
+    )
     assert units[1]["context_image_description"] == "等高线图，甲地海拔高于乙地"
-    assert "context_stem_image_url" not in units[1]
+    assert units[1]["context_stem_image_url"] == "https://example.test/parent.png"
+    assert (
+        units[1]["context_analysis_image_url"]
+        == "https://example.test/parent-analysis.png"
+    )
+    assert units[1]["stem_image_url"] == "https://example.test/child.png"
 
 
 def test_process_file_expands_root_and_sub_questions(tmp_path):

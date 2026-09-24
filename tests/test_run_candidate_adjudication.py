@@ -91,6 +91,7 @@ def test_qwen_profile_uses_qwen_environment_and_shared_adjudication(
             "--run-dir",
             str(tmp_path / "qwen-run"),
             "--disable-thinking",
+            "--enable-vision",
             "--workers",
             "3",
             "--max-tokens",
@@ -114,12 +115,14 @@ def test_qwen_profile_uses_qwen_environment_and_shared_adjudication(
     assert captured["client"]["temperature"] == 0.6
     assert captured["run"]["kwargs"]["model"] == "qwen3.8-27b-fp8"
     assert captured["run"]["kwargs"]["temperature"] == 0.6
+    assert captured["run"]["kwargs"]["enable_vision"] is True
     assert captured["run"]["kwargs"]["workers"] == 3
     assert captured["run"]["kwargs"]["max_tokens"] == 512
     started = json.loads(capsys.readouterr().out.splitlines()[0])
     assert started["profile"] == "qwen"
     assert started["model"] == "qwen3.8-27b-fp8"
     assert started["temperature"] == 0.6
+    assert started["vision_enabled"] is True
 
 
 def test_profile_without_endpoint_names_the_expected_environment_variables(

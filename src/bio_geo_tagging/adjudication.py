@@ -17,6 +17,7 @@ from bio_geo_tagging.ds import DSRequestError, append_evidence, parse_json_conte
 
 
 PROMPT_VERSION = "geography-candidate-adjudication-v1.5-complete-units"
+VISION_PROMPT_VERSION = "geography-candidate-adjudication-v1.5-vision-v1"
 CANDIDATE_ORDER_VERSION = "geography-candidate-order-v2"
 IMAGE_REFERENCE_RE = re.compile(r"(?:读图|据图|下图|上图|图中|该图|如图|示意图|图示)")
 
@@ -62,6 +63,8 @@ def _ensure_run_manifest(path: Path, manifest: dict[str, Any]) -> None:
         existing = json.loads(path.read_text(encoding="utf-8"))
         if "temperature" not in existing and manifest.get("temperature") == 0:
             existing["temperature"] = 0
+        if "vision_enabled" not in existing and not manifest.get("vision_enabled"):
+            existing["vision_enabled"] = False
         if existing != manifest:
             raise ValueError("run manifest mismatch; use a new run directory")
         return
@@ -328,7 +331,48 @@ def apply_audited_exclusions(
     return kept, removed, exclude_training
 
 
-def _image_context_missing(unit: dict[str, Any]) -> bool:
+def image_inputs_for_unit(unit: dict[str, Any]) -> list[dict[str, str]]:
+    """Return labeled image URLs needed by this adjudication unit."""
+    values: list[tuple[str, Any]] = []
+    input_role = _as_text(unit.get("input_role") or unit.get("unit_type"))
+    if input_role == "subquestion":
+        values.extend(
+            [
+                ("公共题干图", unit.get("context_stem_image_url")),
+                ("公共题解析图", unit.get("context_analysis_image_url")),
+            ]
+        )
+    values.extend(
+        [
+            ("当前题干图", unit.get("stem_image_url")),
+            ("当前题解析图", unit.get("analysis_image_url")),
+        ]
+    )
+    if input_role == "whole_question_comprehensive":
+        for index, sub_question in enumerate(unit.get("sub_questions") or [], 1):
+            if not isinstance(sub_question, dict):
+                continue
+            values.extend(
+                [
+                    (f"第{index}小题题干图", sub_question.get("stem_image_url")),
+                    (f"第{index}小题解析图", sub_question.get("analysis_image_url")),
+                ]
+            )
+
+    images: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for label, raw_url in values:
+        url = _as_text(raw_url)
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        images.append({"label": label, "url": url})
+    return images
+
+
+def _image_context_missing(
+    unit: dict[str, Any], *, vision_enabled: bool = False
+) -> bool:
     flags = unit.get("flags") if isinstance(unit.get("flags"), dict) else {}
     if flags.get("image_context_missing") is not None:
         return bool(flags["image_context_missing"])
@@ -360,13 +404,17 @@ def _image_context_missing(unit: dict[str, Any]) -> bool:
             for value in valid_sub_questions
         ),
     ]
-    return not any(descriptions)
+    if any(descriptions):
+        return False
+    return not (vision_enabled and image_inputs_for_unit(unit))
 
 
 def build_adjudication_inputs(
     unit: dict[str, Any],
     candidates: list[dict[str, Any]],
     labels_by_id: dict[str, dict[str, str]],
+    *,
+    vision_enabled: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, str]]:
     question_id = _as_text(unit.get("question_id"))
     shuffled_candidates = sorted(
@@ -422,7 +470,9 @@ def build_adjudication_inputs(
         "parent_context_missing": bool(
             (unit.get("flags") or {}).get("parent_context_missing")
         ),
-        "image_context_missing": _image_context_missing(unit),
+        "image_context_missing": _image_context_missing(
+            unit, vision_enabled=vision_enabled
+        ),
     }
     if input_role == "whole_question_comprehensive":
         raw_sub_questions = unit.get("sub_questions")
@@ -458,9 +508,11 @@ def build_adjudication_prompt(
     unit: dict[str, Any],
     candidates: list[dict[str, Any]],
     labels_by_id: dict[str, dict[str, str]],
+    *,
+    vision_enabled: bool = False,
 ) -> tuple[str, dict[str, str], dict[str, Any]]:
     question, candidate_cards, code_map = build_adjudication_inputs(
-        unit, candidates, labels_by_id
+        unit, candidates, labels_by_id, vision_enabled=vision_enabled
     )
     if question["unit_type"] == "whole_question_comprehensive":
         scope_instruction = """本次是整道大题的综合Label专项判定。你可以阅读公共题干和全部小题，但候选中只提供综合Label。只有多个小题或同一小题中的知识必须跨模块联动、共同形成一个不可拆分的综合判断，并且符合综合Label定义时才选择。仅仅因为整道题包含多个独立知识点、多个小题或同一章节内容，不得选择综合Label。若题目只考查普通Label或区域Label、不构成综合考查，即使存在明确地理考点，也必须返回selected=[]、need_expand_recall=false。只有题目确实形成综合考查、但正确的综合Label不在候选中时，才返回selected=[]、need_expand_recall=true。"""
@@ -468,9 +520,37 @@ def build_adjudication_prompt(
         scope_instruction = """本次判断一道不含小题的完整普通题。可以从候选中选择直接考查的普通Label、区域Label或综合Label，但每个Label都必须独立支持答案中的关键判断。区域仅作为材料发生地时不选区域Label；仅仅涉及多个知识点但不要求联动时不选综合Label。"""
     else:
         scope_instruction = """本次只判断当前小题。大题公共题干只用于补足当前小题明确指代的对象、区域和语境，不得引入兄弟小题的知识。可以同时选择直接考查的普通Label和区域Label；区域只作为材料发生地、案例载体或定位信息时不得选择。综合Label由独立的整题专项判定处理，本次候选中不应选择综合Label。"""
+    vision_instruction = (
+        "本次请求会在文字后附带当前判定范围内的题目图片。图片是有效题目信息，"
+        "应与题干、选项、答案和解析共同用于判标；不得使用兄弟小题图片为当前小题制造考点。"
+        if vision_enabled
+        else ""
+    )
+    evidence_instruction = (
+        "每个selected Label必须提供一条不超过60字的evidence。文字依据应逐字复制自当前"
+        "stem、options、answer_text、analysis、image_description，或在当前小题存在明确指代时"
+        "复制自parent_stem和parent_image_description；图片依据可简短客观描述直接支持该Label的"
+        "可见图表、地图或示意图特征。不得补写图片中不可见的信息。"
+        if vision_enabled
+        else "每个selected Label必须提供一条不超过60字的evidence，逐字复制自当前stem、options、"
+        "answer_text、analysis、image_description，或在当前小题存在明确指代时复制自parent_stem和"
+        "parent_image_description。不得改写或推理补写。"
+    )
+    context_instruction = (
+        "本次附带的图片能够正常读取且足以完成判断时，context_insufficient=false；图片URL无法读取、"
+        "图片模糊或仍缺少必要图像时，必须设context_insufficient=true，不得根据答案或解析反推图片内容。"
+        "其他缺父题或信息冲突导致连一个可靠Label都无法确定时，也设context_insufficient=true。"
+        if vision_enabled
+        else "轻微错别字或OCR异常若可由答案、解析和其他信息唯一消除，context_insufficient=false。"
+        "模型无法查看图片或图片URL；题目明确依赖图片且没有可靠的文字图片描述时，必须设"
+        "context_insufficient=true，不得根据答案或解析反推图片内容。其他缺父题或信息冲突导致连一个"
+        "可靠Label都无法确定时，也设context_insufficient=true。"
+    )
     prompt = f"""你是严谨的高中地理知识点判标器。本任务高精度优先：错标的代价远高于漏标。可以少选、selected=[]或要求扩召；不得为提高覆盖率加入只是相关、同章节、上下位邻近、同一因果链或常见伴随出现的Label。
 
 任务是判断当前题目或当前小题是否直接考查候选Label所定义的知识范围，而不是寻找所有相关知识。只输出简短结论，不输出详细思考过程。
+
+{vision_instruction}
 
 {scope_instruction}
 
@@ -500,11 +580,11 @@ Label有效范围由label_name、label_path、definition、assessment_scope和di
 3. 综合Label：只在整题综合专项中判断。只有多个知识必须联动形成一个不可拆分的联合判断，且符合该Label定义时才选择。大题包含多个彼此独立的小问不等于考查综合Label。
 
 六、evidence与最终复核
-每个selected Label必须提供一条不超过60字的evidence，逐字复制自当前stem、options、answer_text、analysis、image_description，或在当前小题存在明确指代时复制自parent_stem和parent_image_description。不得改写或推理补写。evidence必须支持直接考查，而不只是证明二者相关。
+{evidence_instruction}evidence必须支持直接考查，而不只是证明二者相关。
 生成selected前，对每个暂定Label反证复核：若它实际只是地区材料、共享条件、同一因果链、不同尺度、不同考查维度、上下位相关、背景补充或孤立干扰项，就删除。
 
 七、状态判断
-轻微错别字或OCR异常若可由答案、解析和其他信息唯一消除，context_insufficient=false。DS无法查看图片或图片URL；题目明确依赖图片且没有可靠的文字图片描述时，必须设context_insufficient=true，不得根据答案或解析反推图片内容。其他缺父题或信息冲突导致连一个可靠Label都无法确定时，也设context_insufficient=true。
+{context_instruction}
 普通题或小题若有明确高中地理考点、但所有候选都无法成立：selected=[]、need_expand_recall=true。整题综合专项严格遵循前述专项规则：不构成综合考查时need_expand_recall=false，确实构成综合考查但正确综合Label缺失时才为true。若已有可靠Label，只是怀疑存在不确定次要Label，保留可靠结果且need_expand_recall=false。非有效高中地理考查：selected=[]、need_expand_recall=false、context_insufficient=false。
 
 只能返回C01等短代码，不能抄写label_path。
@@ -527,6 +607,34 @@ Label有效范围由label_name、label_path、definition、assessment_scope和di
 }}
 不要输出Markdown或JSON之外的内容。"""
     return prompt, code_map, question
+
+
+def build_chat_messages(
+    prompt: str,
+    images: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    """Build a text-only or OpenAI-compatible multimodal chat request."""
+    user_content: str | list[dict[str, Any]] = prompt
+    if images:
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for index, image in enumerate(images, 1):
+            content.append(
+                {"type": "text", "text": f"附图{index}：{image['label']}"}
+            )
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image["url"]},
+                }
+            )
+        user_content = content
+    return [
+        {
+            "role": "system",
+            "content": "你是严谨的高中地理知识点判标器，只输出JSON。",
+        },
+        {"role": "user", "content": user_content},
+    ]
 
 
 def validate_adjudication_result(
@@ -759,6 +867,7 @@ def run_adjudication(
     audited_exclusions_path: str | Path | None = None,
     enable_thinking: bool | None = None,
     temperature: float = 0.0,
+    enable_vision: bool = False,
 ) -> dict[str, Any]:
     run_started = time.monotonic()
     run_started_at = datetime.now(timezone.utc).isoformat()
@@ -797,13 +906,15 @@ def run_adjudication(
             key=lambda item: int(item[0]),
         )
     )
+    prompt_version = VISION_PROMPT_VERSION if enable_vision else PROMPT_VERSION
     manifest: dict[str, Any] = {
-        "prompt_version": PROMPT_VERSION,
+        "prompt_version": prompt_version,
         "candidate_order_version": CANDIDATE_ORDER_VERSION,
         "model": model,
         "limit": limit,
         "max_tokens": max_tokens,
         "temperature": temperature,
+        "vision_enabled": enable_vision,
         "input_paths": {
             "units": str(Path(units_path)),
             "candidates": str(Path(candidates_path)),
@@ -829,7 +940,7 @@ def run_adjudication(
     _ensure_run_manifest(output_dir / "run_manifest.json", manifest)
 
     completed, evidence_rows = _latest_success(
-        evidence_path, prompt_version=PROMPT_VERSION
+        evidence_path, prompt_version=prompt_version
     )
     pending_units = [
         (index, unit)
@@ -841,7 +952,8 @@ def run_adjudication(
         run_log_path,
         "START "
         f"input={len(units)} resumed={len(completed)} pending={len(pending_units)} "
-        f"workers={workers} model={model} prompt_version={PROMPT_VERSION}",
+        f"workers={workers} model={model} prompt_version={prompt_version} "
+        f"vision_enabled={enable_vision}",
     )
     requests_succeeded = 0
     requests_failed = 0
@@ -852,11 +964,12 @@ def run_adjudication(
         question_id = _as_text(unit.get("question_id"))
         candidates = candidates_by_unit[unit_key]
         prompt, code_map, question = build_adjudication_prompt(
-            unit, candidates, labels_by_id
+            unit, candidates, labels_by_id, vision_enabled=enable_vision
         )
+        images = image_inputs_for_unit(unit) if enable_vision else []
         record: dict[str, Any] = {
             "stage": "geography_candidate_adjudication",
-            "prompt_version": PROMPT_VERSION,
+            "prompt_version": prompt_version,
             "unit_key": unit_key,
             "question_id": question_id,
             "root_question_id": question["root_question_id"],
@@ -865,6 +978,9 @@ def run_adjudication(
             "candidate_code_map": code_map,
             "model": model,
             "temperature": temperature,
+            "vision_enabled": enable_vision,
+            "image_count": len(images),
+            "image_urls": [image["url"] for image in images],
             "created_at": datetime.now(timezone.utc).isoformat(),
             "raw_response": None,
             "parsed_response": None,
@@ -879,14 +995,7 @@ def run_adjudication(
         }
         try:
             response = client.chat(
-                [
-                    {
-                        "role": "system",
-                        "content": "你是严谨的高中地理知识点判标器，只输出JSON。",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=max_tokens,
+                build_chat_messages(prompt, images), max_tokens=max_tokens
             )
             record.update(
                 {
@@ -938,7 +1047,7 @@ def run_adjudication(
             "requests_failed_this_run": requests_failed,
             "workers": workers,
             "model": model,
-            "prompt_version": PROMPT_VERSION,
+            "prompt_version": prompt_version,
         }
         _write_json_atomic(output_dir / "report.json", interim)
         progress_message = (
@@ -960,7 +1069,7 @@ def run_adjudication(
                 persist(original_index, record, finished)
 
     completed, evidence_rows = _latest_success(
-        evidence_path, prompt_version=PROMPT_VERSION
+        evidence_path, prompt_version=prompt_version
     )
     predictions_path = output_dir / "predictions.jsonl"
     predictions_temporary = predictions_path.with_name(f".{predictions_path.name}.tmp")
@@ -1072,7 +1181,7 @@ def run_adjudication(
                 "usable_for_training": usable_for_training,
                 "candidate_count": len(candidates),
                 "model": model,
-                "prompt_version": PROMPT_VERSION,
+                "prompt_version": prompt_version,
             }
             materialized_predictions.append(prediction)
             output.write(json.dumps(prediction, ensure_ascii=False, sort_keys=True) + "\n")
@@ -1154,7 +1263,8 @@ def run_adjudication(
         "candidate_count_distribution": candidate_count_distribution,
         "model": model,
         "temperature": temperature,
-        "prompt_version": PROMPT_VERSION,
+        "vision_enabled": enable_vision,
+        "prompt_version": prompt_version,
         **question_prediction_summary,
     }
     _write_json_atomic(output_dir / "report.json", report)

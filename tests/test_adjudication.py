@@ -7,8 +7,10 @@ from bio_geo_tagging.adjudication import (
     CandidateIndex,
     build_adjudication_inputs,
     build_adjudication_prompt,
+    build_chat_messages,
     candidates_for_unit,
     limit_units_by_root,
+    image_inputs_for_unit,
     load_labels,
     normalize_candidates,
     run_adjudication,
@@ -41,6 +43,42 @@ class FakeClient:
             latency_seconds=0.01,
             usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
         )
+
+
+def test_multimodal_messages_include_parent_and_current_images():
+    unit = {
+        "input_role": "subquestion",
+        "context_stem_image_url": "https://example.test/parent.png",
+        "stem_image_url": "https://example.test/child.png",
+        "analysis_image_url": "https://example.test/child-analysis.png",
+    }
+
+    images = image_inputs_for_unit(unit)
+    messages = build_chat_messages("题目文本", images)
+
+    assert [image["label"] for image in images] == [
+        "公共题干图",
+        "当前题干图",
+        "当前题解析图",
+    ]
+    assert messages[1]["content"] == [
+        {"type": "text", "text": "题目文本"},
+        {"type": "text", "text": "附图1：公共题干图"},
+        {
+            "type": "image_url",
+            "image_url": {"url": "https://example.test/parent.png"},
+        },
+        {"type": "text", "text": "附图2：当前题干图"},
+        {
+            "type": "image_url",
+            "image_url": {"url": "https://example.test/child.png"},
+        },
+        {"type": "text", "text": "附图3：当前题解析图"},
+        {
+            "type": "image_url",
+            "image_url": {"url": "https://example.test/child-analysis.png"},
+        },
+    ]
 
 
 def test_normalize_candidates_supports_all_current_formats():

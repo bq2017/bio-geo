@@ -18,6 +18,8 @@ QUESTION_FIELDS = {
     "analysis",
     "explanation",
     "image_description",
+    "stem_image_url",
+    "analysis_image_url",
     "flags",
 }
 
@@ -73,6 +75,10 @@ def expand_question(question: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
         image_description = question.get("image_description")
         if image_description:
             sub_unit["context_image_description"] = image_description
+        for field in ("stem_image_url", "analysis_image_url"):
+            value = question.get(field)
+            if value:
+                sub_unit[f"context_{field}"] = value
         yield sub_unit
 
 

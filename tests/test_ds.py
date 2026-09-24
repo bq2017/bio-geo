@@ -49,3 +49,25 @@ def test_client_sends_profile_temperature_and_thinking_setting(monkeypatch):
         "chat_template_kwargs": {"enable_thinking": False},
     }
     assert captured["timeout"] == 600
+
+
+def test_client_preserves_multimodal_message_content(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return FakeResponse()
+
+    monkeypatch.setattr(ds, "urlopen", fake_urlopen)
+    client = ds.DSClient(["http://test/v1/chat/completions"], "vision-model")
+    content = [
+        {"type": "text", "text": "读图回答"},
+        {
+            "type": "image_url",
+            "image_url": {"url": "https://example.test/map.png"},
+        },
+    ]
+
+    client.chat([{"role": "user", "content": content}])
+
+    assert captured["payload"]["messages"][0]["content"] == content

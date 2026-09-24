@@ -40,6 +40,11 @@ def parse_args(
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=default_temperature)
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument(
+        "--enable-vision",
+        action="store_true",
+        help="send question image URLs as OpenAI-compatible multimodal content",
+    )
     thinking = parser.add_mutually_exclusive_group()
     thinking.add_argument(
         "--enable-thinking",
@@ -122,6 +127,7 @@ def main(
                 "profile": profile,
                 "model": args.model,
                 "temperature": args.temperature,
+                "vision_enabled": args.enable_vision,
                 "workers": args.workers,
             },
             ensure_ascii=False,
@@ -141,6 +147,7 @@ def main(
         audited_exclusions_path=args.audited_exclusions,
         enable_thinking=args.enable_thinking,
         temperature=args.temperature,
+        enable_vision=args.enable_vision,
     )
     print(json.dumps({"run_dir": str(run_dir), **report}, ensure_ascii=False))
     return 0 if report["success"] == report["input"] and report["error"] == 0 else 1

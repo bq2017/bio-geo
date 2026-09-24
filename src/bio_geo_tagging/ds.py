@@ -104,7 +104,7 @@ class DSClient:
 
     def chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         max_tokens: int = 1024,
     ) -> DSResponse:
