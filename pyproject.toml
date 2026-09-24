@@ -34,6 +34,8 @@ question-hybrid-retrieval = "bio_geo_tagging.hybrid_candidate_retrieval:main"
 question-bge-length-diagnosis = "bio_geo_tagging.bge_length_diagnosis:main"
 question-image-urls = "bio_geo_tagging.attach_question_images:main"
 question-candidate-adjudication = "bio_geo_tagging.run_candidate_adjudication:main"
+question-candidate-adjudication-ds = "bio_geo_tagging.run_candidate_adjudication_ds:main"
+question-candidate-adjudication-qwen = "bio_geo_tagging.run_candidate_adjudication_qwen:main"
 question-candidate-adjudication-evaluate = "bio_geo_tagging.adjudication_evaluation:main"
 question-tagging-pipeline = "bio_geo_tagging.run_tagging_pipeline:main"
 

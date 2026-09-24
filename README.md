@@ -220,24 +220,27 @@ geography-full-pipeline-v1/
 `question_id`/`parent_id`和`combined_candidates[].label_path`，不会读取或发送
 `knw_labels`、各种`missing_labels`、BM25/BGE分数与排名、`selection_source`或
 区域证据字段。题目正文来自独立生成的打标单元；候选路径会先做与召回顺序无关的
-确定性打乱，再关联标签文件中的完整释义后发送给DS。
+确定性打乱，再关联标签文件中的完整释义后发送给判标模型。
 
 普通题执行一次全部候选精排。大题的每个小题同时判断普通标签和区域标签，公共题干
 只作上下文；区域仅作为材料发生地或定位信息时不选。公共题干和全部小题另执行一次
 综合Label专项判断。最终 `question_predictions.jsonl` 将各小题的普通/区域标签与
 整题综合标签合并为整道题结果。
 
-示例：
+DeepSeek与Qwen使用同一套题目组装、候选顺序、Prompt、JSON校验、断点续跑和结果
+物化逻辑，仅模型名、服务端点和输出目录不同。这样两组结果可以直接比较，避免把代码
+差异误当成模型差异。
+
+DeepSeek示例：
 
 ```bash
-PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication \
+PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication_ds \
   --units data/annotation/geography-high-score-valid-tagging-units-filtered-v2.jsonl \
   --candidates runs/tagging/geography-stage1-final-candidates-1826.jsonl \
   --labels data/taxonomy/geography-existing-definitions.jsonl \
   --audited-exclusions configs/geography_adjudication_audited_exclusions.json \
-  --run-dir runs/tagging/geography-adjudication-smoke-50-v1.5 \
+  --run-dir runs/tagging/geography-adjudication-ds-smoke-50-v1.5 \
   --endpoint http://172.22.0.35:9204/v1/chat/completions \
-  --model DeepSeek-V4-Flash \
   --disable-thinking \
   --limit 50 \
   --workers 10 \
@@ -247,6 +250,33 @@ PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication \
   --request-interval 0 \
   --max-tokens 512
 ```
+
+Qwen示例：
+
+```bash
+PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication_qwen \
+  --units data/annotation/geography-high-score-valid-tagging-units-filtered-v2.jsonl \
+  --candidates runs/tagging/geography-stage1-final-candidates-1826.jsonl \
+  --labels data/taxonomy/geography-existing-definitions.jsonl \
+  --audited-exclusions configs/geography_adjudication_audited_exclusions.json \
+  --run-dir runs/tagging/geography-adjudication-qwen-smoke-50-v1.5 \
+  --endpoint "$QWEN_LEGACY_ENDPOINT" \
+  --disable-thinking \
+  --limit 50 \
+  --workers 10 \
+  --timeout 600 \
+  --retries 3 \
+  --retry-delay 1 \
+  --request-interval 0 \
+  --max-tokens 512
+```
+
+两个入口分别默认使用`DeepSeek-V4-Flash`和`Qwen3.8-27B`。也可以不传
+`--endpoint`：DeepSeek入口读取`DS1`/`DS2`，Qwen入口读取
+`QWEN_LEGACY_ENDPOINT`/`QWEN1`/`QWEN2`。两版客户端均按生物版兼容协议发送
+OpenAI格式请求，使用`temperature=0`、`stream=false`；`--disable-thinking`会发送
+`chat_template_kwargs.enable_thinking=false`。专用模型环境变量分别为
+`DEEPSEEK_MODEL`和`QWEN_MODEL`，也可以用`--model`显式覆盖。
 
 输出目录包含 `evidence.jsonl`、`predictions.jsonl`、`report.json`、
 `question_predictions.jsonl`、`run_manifest.json` 和 `run.log`。`run.log`会追加记录

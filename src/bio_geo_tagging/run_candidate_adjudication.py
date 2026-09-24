@@ -1,4 +1,4 @@
-"""Ask DS to select directly assessed geography labels from recalled candidates."""
+"""Run geography candidate adjudication with an OpenAI-compatible model."""
 
 from __future__ import annotations
 
@@ -12,15 +12,20 @@ from bio_geo_tagging.adjudication import run_adjudication
 from bio_geo_tagging.ds import DSClient
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+def parse_args(
+    argv: list[str] | None = None,
+    *,
+    description: str = __doc__,
+    default_model: str = "DeepSeek-V4-Flash",
+) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--units", type=Path, required=True)
     parser.add_argument("--candidates", type=Path, required=True)
     parser.add_argument("--labels", type=Path, required=True)
     parser.add_argument("--audited-exclusions", type=Path)
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--endpoint", action="append", dest="endpoints")
-    parser.add_argument("--model", default=os.getenv("MODEL", "DeepSeek-V4-Flash"))
+    parser.add_argument("--model", default=default_model)
     parser.add_argument("--limit", type=int, help="limit complete root questions")
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--retries", type=int, default=3)
@@ -47,16 +52,38 @@ def parse_args() -> argparse.Namespace:
         help="disable thinking mode through chat_template_kwargs",
     )
     parser.set_defaults(enable_thinking=None)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def _first_environment_value(names: tuple[str, ...]) -> str | None:
+    return next((value for name in names if (value := os.getenv(name))), None)
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    profile: str = "deepseek",
+    default_model: str = "DeepSeek-V4-Flash",
+    model_environment_names: tuple[str, ...] = ("MODEL",),
+    endpoint_environment_names: tuple[str, ...] = ("DS1", "DS2"),
+    default_run_suffix: str = "geography-candidate-adjudication-ds",
+) -> int:
+    resolved_default_model = (
+        _first_environment_value(model_environment_names) or default_model
+    )
+    args = parse_args(
+        argv,
+        description=f"Run geography candidate adjudication with the {profile} profile.",
+        default_model=resolved_default_model,
+    )
     endpoints = args.endpoints or [
-        value for value in (os.getenv("DS1"), os.getenv("DS2")) if value
+        value
+        for name in endpoint_environment_names
+        if (value := os.getenv(name))
     ]
     if not endpoints:
-        raise SystemExit("provide --endpoint or set DS1/DS2")
+        environment_hint = "/".join(endpoint_environment_names)
+        raise SystemExit(f"provide --endpoint or set {environment_hint}")
     if args.limit is not None and args.limit < 1:
         raise SystemExit("--limit must be positive")
     if args.workers < 1:
@@ -68,7 +95,7 @@ def main() -> int:
     if args.max_tokens < 1:
         raise SystemExit("--max-tokens must be positive")
     run_dir = args.run_dir or Path("runs") / datetime.now().strftime(
-        "%Y%m%d-%H%M%S-geography-candidate-adjudication"
+        f"%Y%m%d-%H%M%S-{default_run_suffix}"
     )
     client = DSClient(
         endpoints,
@@ -84,6 +111,7 @@ def main() -> int:
             {
                 "status": "started",
                 "run_dir": str(run_dir),
+                "profile": profile,
                 "model": args.model,
                 "workers": args.workers,
             },
