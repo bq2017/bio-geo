@@ -37,7 +37,7 @@ from bio_geo_tagging import run_candidate_adjudication_qwen as qwen_cli
                 "default_endpoints": (
                     "http://172.22.0.35:9204/v1/chat/completions",
                 ),
-                "default_temperature": 0.6,
+                "default_temperature": 0.0,
                 "default_run_suffix": "geography-candidate-adjudication-qwen",
             },
         ),
@@ -102,7 +102,7 @@ def test_qwen_profile_uses_qwen_environment_and_shared_adjudication(
         model_environment_names=("QWEN_MODEL",),
         endpoint_environment_names=("QWEN_LEGACY_ENDPOINT", "QWEN1", "QWEN2"),
         default_endpoints=("http://172.22.0.35:9204/v1/chat/completions",),
-        default_temperature=0.6,
+        default_temperature=0.0,
         default_run_suffix="geography-candidate-adjudication-qwen",
     )
 
@@ -112,16 +112,16 @@ def test_qwen_profile_uses_qwen_environment_and_shared_adjudication(
     ]
     assert captured["client"]["model"] == "qwen3.8-27b-fp8"
     assert captured["client"]["enable_thinking"] is False
-    assert captured["client"]["temperature"] == 0.6
+    assert captured["client"]["temperature"] == 0.0
     assert captured["run"]["kwargs"]["model"] == "qwen3.8-27b-fp8"
-    assert captured["run"]["kwargs"]["temperature"] == 0.6
+    assert captured["run"]["kwargs"]["temperature"] == 0.0
     assert captured["run"]["kwargs"]["enable_vision"] is True
     assert captured["run"]["kwargs"]["workers"] == 3
     assert captured["run"]["kwargs"]["max_tokens"] == 512
     started = json.loads(capsys.readouterr().out.splitlines()[0])
     assert started["profile"] == "qwen"
     assert started["model"] == "qwen3.8-27b-fp8"
-    assert started["temperature"] == 0.6
+    assert started["temperature"] == 0.0
     assert started["vision_enabled"] is True
 
 

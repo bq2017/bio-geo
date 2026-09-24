@@ -16,7 +16,7 @@ def main() -> int:
             "QWEN2",
         ),
         default_endpoints=("http://172.22.0.35:9204/v1/chat/completions",),
-        default_temperature=0.6,
+        default_temperature=0.0,
         default_run_suffix="geography-candidate-adjudication-qwen",
     )
 

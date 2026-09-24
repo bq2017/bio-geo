@@ -137,34 +137,36 @@ PYTHONPATH=src .venv/bin/python -m bio_geo_tagging.hybrid_candidate_retrieval \
 
 ## 第一、二阶段统一运行
 
-正式运行可使用统一入口依次生成打标单元、执行候选召回、运行DS精排、生成自动诊断，
-并合并旧标签与DS新增标签：
+正式运行可使用统一入口依次生成打标单元、执行一次候选召回，再并行运行DeepSeek和
+Qwen精排，并分别生成自动诊断与结果：
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m bio_geo_tagging.run_tagging_pipeline \
+CUDA_VISIBLE_DEVICES=7 PYTHONPATH=src .venv/bin/python -m bio_geo_tagging.run_tagging_pipeline \
   --input data/annotation/geography-high-score-valid-questions-filtered-v2.jsonl \
   --labels data/taxonomy/geography-existing-definitions.jsonl \
   --index-dir data/processed/geography-label-retrieval-index-char2-comprehensive-bm25-v3 \
   --region-index-dir data/processed/geography-region-label-retrieval-index-phrase \
   --run-dir runs/tagging/geography-full-pipeline-v1 \
   --audited-exclusions configs/geography_adjudication_audited_exclusions.json \
-  --endpoint http://172.22.0.35:9204/v1/chat/completions \
-  --model DeepSeek-V4-Flash \
+  --deepseek-endpoint http://172.22.0.35:9104/v1/chat/completions \
+  --qwen-endpoint http://172.22.0.35:9204/v1/chat/completions \
+  --deepseek-model DeepSeek-V4-Flash \
+  --qwen-model qwen3.8-27b-fp8 \
   --disable-thinking \
   --nonregion-candidate-limit 30 \
   --region-candidate-limit 5 \
   --comprehensive-candidate-limit 5 \
   --region-bm25-min-score 0 \
   --region-bge-min-score 0.4 \
-  --embedding-model BAAI/bge-large-zh-v1.5 \
-  --device cpu \
+  --embedding-model data/models/bge-large-zh-v1.5 \
+  --device cuda \
   --batch-size 32 \
-  --workers 30 \
+  --deepseek-workers 10 \
+  --qwen-workers 10 \
   --timeout 600 \
   --retries 3 \
   --retry-delay 1 \
   --request-interval 0 \
-  --temperature 0 \
   --max-tokens 512
 ```
 
@@ -175,22 +177,23 @@ geography-full-pipeline-v1/
 ├── tagging-units.jsonl
 ├── candidates.jsonl
 ├── candidate-summary.json
-├── adjudication/
-│   ├── evidence.jsonl
-│   ├── predictions.jsonl
-│   ├── question_predictions.jsonl
-│   ├── report.json
-│   └── run.log
-├── evaluation.json
-├── evaluation_details.jsonl
-├── final_labels.jsonl
+├── deepseek/
+│   ├── adjudication/
+│   ├── evaluation.json
+│   ├── final_labels.jsonl
+│   └── pipeline-failures.jsonl
+├── qwen/
+│   ├── adjudication/
+│   ├── evaluation.json
+│   ├── final_labels.jsonl
+│   └── pipeline-failures.jsonl
 ├── pipeline.log
 ├── pipeline_manifest.json
 └── pipeline_report.json
 ```
 
-相同命令和运行目录可断点续跑：已完成的打标单元和候选召回会跳过，DS精排复用
-`evidence.jsonl`中的成功记录。输入、索引路径、模型或关键参数变化时必须使用新的
+相同命令和运行目录可断点续跑：已完成的打标单元和候选召回会跳过，两个模型分别复用
+各自`evidence.jsonl`中的成功记录。输入、索引路径、模型或关键参数变化时必须使用新的
 `--run-dir`。单题DS调用或输出解析失败不会中断全量处理；流水线继续生成成功题目的
 结果，并将尚未成功的单元写入`pipeline-failures.jsonl`，状态记为
 `completed_with_errors`。使用同一命令和运行目录重跑时只补跑失败单元。输入文件、
@@ -198,11 +201,9 @@ geography-full-pipeline-v1/
 统一入口不会把召回文件中的`knw_labels`或评测字段发送给DS。原来的阶段一、阶段二
 独立命令继续保留，用于单独调试。
 
-使用Qwen多模态模型运行统一流水线时，将`--model`改为
-`qwen3.8-27b-fp8`并增加`--enable-vision --temperature 0`。只有题干、选项或小题中
-明确出现“读图”“如图”“图示”等图片指示语时，阶段二才会发送已关联的图片；阶段一
-BM25/BGE仍只读取文本。阶段一使用CUDA时，候选召回完成后会释放BGE的CUDA缓存，
-再进入阶段二。
+统一入口只执行一次BM25/BGE召回，然后并行启动DeepSeek和Qwen阶段二；两个模型读取
+同一份`tagging-units.jsonl`和`candidates.jsonl`，均固定`temperature=0`且不发送图片。
+阶段一使用CUDA时，候选召回完成后会释放BGE的CUDA缓存，再同时调用两个模型服务。
 
 ## 第二阶段：候选标签精排
 
@@ -272,7 +273,7 @@ PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication_qwen \
   --run-dir runs/tagging/geography-adjudication-qwen-smoke-50-v1.5 \
   --endpoint http://172.22.0.35:9204/v1/chat/completions \
   --model qwen3.8-27b-fp8 \
-  --temperature 0.6 \
+  --temperature 0 \
   --disable-thinking \
   --limit 50 \
   --workers 10 \
@@ -284,7 +285,7 @@ PYTHONPATH=src python -m bio_geo_tagging.run_candidate_adjudication_qwen \
 ```
 
 两个入口分别默认使用`DeepSeek-V4-Flash`和`qwen3.8-27b-fp8`。Qwen入口默认
-连接`http://172.22.0.35:9204/v1/chat/completions`，默认`temperature=0.6`；
+连接`http://172.22.0.35:9204/v1/chat/completions`，默认`temperature=0`；
 DeepSeek入口保持`temperature=0`。也可以传`--endpoint`或使用环境变量：DeepSeek
 读取`DS1`/`DS2`，Qwen读取`QWEN_LEGACY_ENDPOINT`/`QWEN1`/`QWEN2`。两版客户端
 均发送OpenAI格式请求和`stream=false`；`--disable-thinking`会发送

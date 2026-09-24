@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -136,6 +137,79 @@ def _release_retrieval_cuda_memory(device: str | None) -> None:
         torch.cuda.empty_cache()
 
 
+def _run_model_stage(
+    *,
+    output_root: Path,
+    units_path: Path,
+    candidates_path: Path,
+    labels_path: Path,
+    client: Any,
+    model: str,
+    limit: int | None,
+    max_tokens: int,
+    workers: int,
+    audited_exclusions_path: Path | None,
+    enable_thinking: bool | None,
+    temperature: float,
+    enable_vision: bool,
+    adjudication_runner: Callable[..., dict[str, Any]],
+    evaluation_runner: Callable[..., dict[str, Any]],
+) -> dict[str, Any]:
+    adjudication_dir = output_root / "adjudication"
+    evaluation_path = output_root / "evaluation.json"
+    evaluation_details_path = output_root / "evaluation_details.jsonl"
+    final_labels_path = output_root / "final_labels.jsonl"
+    failures_path = output_root / "pipeline-failures.jsonl"
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    adjudication_report = adjudication_runner(
+        units_path,
+        candidates_path,
+        labels_path,
+        adjudication_dir,
+        client,
+        model=model,
+        limit=limit,
+        max_tokens=max_tokens,
+        workers=workers,
+        audited_exclusions_path=audited_exclusions_path,
+        enable_thinking=enable_thinking,
+        temperature=temperature,
+        enable_vision=enable_vision,
+    )
+    incomplete = bool(
+        adjudication_report.get("error")
+        or adjudication_report.get("success") != adjudication_report.get("input")
+    )
+    unresolved_failure_units = _write_unresolved_adjudication_failures(
+        adjudication_dir / "evidence.jsonl",
+        failures_path,
+    )
+    diagnostics = evaluation_runner(
+        adjudication_dir,
+        candidates_path,
+        labels_path,
+        evaluation_path,
+        evaluation_details_path,
+        None,
+        final_labels_path,
+    )
+    if not final_labels_path.is_file():
+        raise RuntimeError("automatic diagnostics produced no final labels")
+    return {
+        "status": "completed_with_errors" if incomplete else "completed",
+        "model": model,
+        "output_root": str(output_root),
+        "adjudication_dir": str(adjudication_dir),
+        "evaluation": str(evaluation_path),
+        "final_labels": str(final_labels_path),
+        "failures": str(failures_path),
+        "unresolved_failure_units": unresolved_failure_units,
+        "adjudication": adjudication_report,
+        "diagnostics": diagnostics,
+    }
+
+
 def run_pipeline(
     *,
     input_path: Path,
@@ -145,6 +219,9 @@ def run_pipeline(
     run_dir: Path,
     client: Any,
     model: str,
+    qwen_client: Any | None = None,
+    qwen_model: str | None = None,
+    qwen_workers: int | None = None,
     audited_exclusions_path: Path | None = None,
     limit: int | None = None,
     nonregion_candidate_limit: int = 30,
@@ -165,6 +242,11 @@ def run_pipeline(
     adjudication_runner: Callable[..., dict[str, Any]] = run_adjudication,
     evaluation_runner: Callable[..., dict[str, Any]] = evaluate_adjudication,
 ) -> dict[str, Any]:
+    dual_model = qwen_client is not None
+    if dual_model and not qwen_model:
+        raise ValueError("qwen_model is required when qwen_client is provided")
+    if dual_model and (temperature != 0 or enable_vision):
+        raise ValueError("dual-model pipeline requires temperature=0 and text-only mode")
     for path, description in (
         (input_path, "input"),
         (labels_path, "labels"),
@@ -193,12 +275,6 @@ def run_pipeline(
     units_log_path = run_dir / "tagging-units.log"
     candidates_path = run_dir / "candidates.jsonl"
     candidate_summary_path = run_dir / "candidate-summary.json"
-    adjudication_dir = run_dir / "adjudication"
-    evaluation_path = run_dir / "evaluation.json"
-    evaluation_details_path = run_dir / "evaluation_details.jsonl"
-    final_labels_path = run_dir / "final_labels.jsonl"
-    failures_path = run_dir / "pipeline-failures.jsonl"
-
     manifest = {
         "pipeline_version": "geography-tagging-pipeline-v1",
         "input": {"path": str(input_path), "sha256": _sha256(input_path)},
@@ -229,15 +305,34 @@ def run_pipeline(
             "device": device,
             "batch_size": batch_size,
         },
-        "adjudication": {
-            "model": model,
-            "limit": limit,
-            "workers": workers,
-            "max_tokens": max_tokens,
-            "enable_thinking": enable_thinking,
-            "temperature": temperature,
-            "vision_enabled": enable_vision,
-        },
+        "adjudication": (
+            {
+                "mode": "dual_model_parallel",
+                "limit": limit,
+                "max_tokens": max_tokens,
+                "enable_thinking": enable_thinking,
+                "temperature": 0.0,
+                "vision_enabled": False,
+                "models": {
+                    "deepseek": {"model": model, "workers": workers},
+                    "qwen": {
+                        "model": qwen_model,
+                        "workers": qwen_workers or workers,
+                    },
+                },
+            }
+            if dual_model
+            else {
+                "mode": "single_model",
+                "model": model,
+                "limit": limit,
+                "workers": workers,
+                "max_tokens": max_tokens,
+                "enable_thinking": enable_thinking,
+                "temperature": temperature,
+                "vision_enabled": enable_vision,
+            }
+        ),
     }
     _ensure_manifest(run_dir / "pipeline_manifest.json", manifest)
 
@@ -288,56 +383,76 @@ def run_pipeline(
             _emit(log_path, "candidate_retrieval", "completed", output=str(candidates_path))
             _release_retrieval_cuda_memory(device)
 
-        _emit(log_path, "candidate_adjudication", "started")
-        adjudication_report = adjudication_runner(
-            units_path,
-            candidates_path,
-            labels_path,
-            adjudication_dir,
-            client,
-            model=model,
-            limit=limit,
-            max_tokens=max_tokens,
-            workers=workers,
-            audited_exclusions_path=audited_exclusions_path,
-            enable_thinking=enable_thinking,
-            temperature=temperature,
-            enable_vision=enable_vision,
-        )
-        adjudication_incomplete = bool(
-            adjudication_report.get("error")
-            or adjudication_report.get("success") != adjudication_report.get("input")
-        )
-        unresolved_failure_units = _write_unresolved_adjudication_failures(
-            adjudication_dir / "evidence.jsonl",
-            failures_path,
-        )
-        _emit(
-            log_path,
-            "candidate_adjudication",
-            "completed_with_errors" if adjudication_incomplete else "completed",
-            output=str(adjudication_dir),
-            unresolved_failure_units=unresolved_failure_units,
-        )
+        profiles = {
+            "deepseek": {
+                "client": client,
+                "model": model,
+                "workers": workers,
+                "output_root": run_dir / "deepseek" if dual_model else run_dir,
+                "temperature": 0.0 if dual_model else temperature,
+                "enable_vision": False if dual_model else enable_vision,
+            }
+        }
+        if dual_model:
+            profiles["qwen"] = {
+                "client": qwen_client,
+                "model": qwen_model,
+                "workers": qwen_workers or workers,
+                "output_root": run_dir / "qwen",
+                "temperature": 0.0,
+                "enable_vision": False,
+            }
+        for profile in profiles:
+            _emit(log_path, "candidate_adjudication", "started", profile=profile)
 
-        _emit(log_path, "automatic_diagnostics", "started")
-        diagnostics = evaluation_runner(
-            adjudication_dir,
-            candidates_path,
-            labels_path,
-            evaluation_path,
-            evaluation_details_path,
-            None,
-            final_labels_path,
-        )
-        if not final_labels_path.is_file():
-            raise RuntimeError("automatic diagnostics produced no final labels")
-        _emit(
-            log_path,
-            "automatic_diagnostics",
-            "completed",
-            final_labels=str(final_labels_path),
-        )
+        model_results: dict[str, dict[str, Any]] = {}
+        with ThreadPoolExecutor(max_workers=len(profiles)) as executor:
+            futures = {
+                executor.submit(
+                    _run_model_stage,
+                    output_root=configuration["output_root"],
+                    units_path=units_path,
+                    candidates_path=candidates_path,
+                    labels_path=labels_path,
+                    client=configuration["client"],
+                    model=configuration["model"],
+                    limit=limit,
+                    max_tokens=max_tokens,
+                    workers=configuration["workers"],
+                    audited_exclusions_path=audited_exclusions_path,
+                    enable_thinking=enable_thinking,
+                    temperature=configuration["temperature"],
+                    enable_vision=configuration["enable_vision"],
+                    adjudication_runner=adjudication_runner,
+                    evaluation_runner=evaluation_runner,
+                ): profile
+                for profile, configuration in profiles.items()
+            }
+            for future in as_completed(futures):
+                profile = futures[future]
+                try:
+                    model_results[profile] = future.result()
+                except Exception as exc:
+                    error_message = f"{type(exc).__name__}: {exc}"
+                    output_root = profiles[profile]["output_root"]
+                    output_root.mkdir(parents=True, exist_ok=True)
+                    _write_json(
+                        output_root / "model-error.json",
+                        {"profile": profile, "error": error_message},
+                    )
+                    model_results[profile] = {
+                        "status": "error",
+                        "model": profiles[profile]["model"],
+                        "output_root": str(output_root),
+                        "error": error_message,
+                    }
+                _emit(
+                    log_path,
+                    "candidate_adjudication",
+                    model_results[profile]["status"],
+                    profile=profile,
+                    output=model_results[profile]["output_root"],
+                )
     except Exception as exc:
         error_message = f"{type(exc).__name__}: {exc}"
         _emit(
@@ -355,29 +470,39 @@ def run_pipeline(
         )
         raise
 
+    overall_status = (
+        "completed"
+        if all(value["status"] == "completed" for value in model_results.values())
+        else "completed_with_errors"
+    )
     result = {
-        "status": (
-            "completed_with_errors" if adjudication_incomplete else "completed"
-        ),
+        "status": overall_status,
         "run_dir": str(run_dir),
         "units": str(units_path),
         "candidates": str(candidates_path),
-        "adjudication_dir": str(adjudication_dir),
-        "evaluation": str(evaluation_path),
-        "final_labels": str(final_labels_path),
-        "failures": str(failures_path),
-        "unresolved_failure_units": unresolved_failure_units,
-        "adjudication": adjudication_report,
-        "diagnostics": diagnostics,
+        "models": model_results,
     }
+    if not dual_model:
+        single_result = model_results["deepseek"]
+        result.update(
+            {
+                "adjudication_dir": single_result["adjudication_dir"],
+                "evaluation": single_result["evaluation"],
+                "final_labels": single_result["final_labels"],
+                "failures": single_result["failures"],
+                "unresolved_failure_units": single_result[
+                    "unresolved_failure_units"
+                ],
+                "adjudication": single_result["adjudication"],
+                "diagnostics": single_result["diagnostics"],
+            }
+        )
     _write_json(run_dir / "pipeline_report.json", result)
     _emit(
         log_path,
         "pipeline",
         result["status"],
-        final_labels=str(final_labels_path),
-        failures=str(failures_path),
-        unresolved_failure_units=unresolved_failure_units,
+        models={name: value["status"] for name, value in model_results.items()},
     )
     return result
 
@@ -390,8 +515,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--region-index-dir", type=Path, required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--audited-exclusions", type=Path)
-    parser.add_argument("--endpoint", action="append", dest="endpoints")
-    parser.add_argument("--model", default=os.getenv("MODEL", "DeepSeek-V4-Flash"))
+    parser.add_argument(
+        "--deepseek-endpoint", action="append", dest="deepseek_endpoints"
+    )
+    parser.add_argument("--qwen-endpoint", action="append", dest="qwen_endpoints")
+    parser.add_argument(
+        "--deepseek-model",
+        default=os.getenv("DEEPSEEK_MODEL", "DeepSeek-V4-Flash"),
+    )
+    parser.add_argument(
+        "--qwen-model",
+        default=os.getenv("QWEN_MODEL", "qwen3.8-27b-fp8"),
+    )
     parser.add_argument("--limit", type=int)
     parser.add_argument("--nonregion-candidate-limit", type=int, default=30)
     parser.add_argument("--region-candidate-limit", type=int, default=5)
@@ -401,14 +536,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--embedding-model")
     parser.add_argument("--device")
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--deepseek-workers", type=int, default=1)
+    parser.add_argument("--qwen-workers", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--retry-delay", type=float, default=1.0)
     parser.add_argument("--request-interval", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, default=1024)
-    parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--enable-vision", action="store_true")
     thinking = parser.add_mutually_exclusive_group()
     thinking.add_argument("--enable-thinking", dest="enable_thinking", action="store_true")
     thinking.add_argument("--disable-thinking", dest="enable_thinking", action="store_false")
@@ -418,37 +552,59 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    endpoints = args.endpoints or [
+    deepseek_endpoints = args.deepseek_endpoints or [
         value for value in (os.getenv("DS1"), os.getenv("DS2")) if value
     ]
-    if not endpoints:
-        raise SystemExit("provide --endpoint or set DS1/DS2")
+    qwen_endpoints = args.qwen_endpoints or [
+        value
+        for value in (
+            os.getenv("QWEN_LEGACY_ENDPOINT"),
+            os.getenv("QWEN1"),
+            os.getenv("QWEN2"),
+        )
+        if value
+    ]
+    if not deepseek_endpoints:
+        raise SystemExit("provide --deepseek-endpoint or set DS1/DS2")
+    if not qwen_endpoints:
+        raise SystemExit(
+            "provide --qwen-endpoint or set QWEN_LEGACY_ENDPOINT/QWEN1/QWEN2"
+        )
     for name in (
         "limit",
         "nonregion_candidate_limit",
         "region_candidate_limit",
         "comprehensive_candidate_limit",
         "batch_size",
-        "workers",
+        "deepseek_workers",
+        "qwen_workers",
         "max_tokens",
     ):
         value = getattr(args, name)
         if value is not None and value < 1:
             raise SystemExit(f"--{name.replace('_', '-')} must be positive")
-    if args.retry_delay < 0 or args.request_interval < 0 or args.temperature < 0:
-        raise SystemExit(
-            "retry delay, request interval, and temperature must be non-negative"
-        )
+    if args.retry_delay < 0 or args.request_interval < 0:
+        raise SystemExit("retry delay and request interval must be non-negative")
 
-    client = DSClient(
-        endpoints,
-        args.model,
+    deepseek_client = DSClient(
+        deepseek_endpoints,
+        args.deepseek_model,
         timeout=args.timeout,
         retries=args.retries,
         retry_delay=args.retry_delay,
         request_interval=args.request_interval,
         enable_thinking=args.enable_thinking,
-        temperature=args.temperature,
+        temperature=0.0,
+    )
+    qwen_client = DSClient(
+        qwen_endpoints,
+        args.qwen_model,
+        timeout=args.timeout,
+        retries=args.retries,
+        retry_delay=args.retry_delay,
+        request_interval=args.request_interval,
+        enable_thinking=args.enable_thinking,
+        temperature=0.0,
     )
     try:
         result = run_pipeline(
@@ -457,8 +613,11 @@ def main() -> int:
             index_dir=args.index_dir,
             region_index_dir=args.region_index_dir,
             run_dir=args.run_dir,
-            client=client,
-            model=args.model,
+            client=deepseek_client,
+            model=args.deepseek_model,
+            qwen_client=qwen_client,
+            qwen_model=args.qwen_model,
+            qwen_workers=args.qwen_workers,
             audited_exclusions_path=args.audited_exclusions,
             limit=args.limit,
             nonregion_candidate_limit=args.nonregion_candidate_limit,
@@ -469,11 +628,11 @@ def main() -> int:
             embedding_model=args.embedding_model,
             device=args.device,
             batch_size=args.batch_size,
-            workers=args.workers,
+            workers=args.deepseek_workers,
             max_tokens=args.max_tokens,
             enable_thinking=args.enable_thinking,
-            temperature=args.temperature,
-            enable_vision=args.enable_vision,
+            temperature=0.0,
+            enable_vision=False,
         )
     except Exception as exc:
         print(f"FATAL: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
@@ -483,9 +642,13 @@ def main() -> int:
             {
                 "status": result["status"],
                 "run_dir": result["run_dir"],
-                "final_labels": result["final_labels"],
-                "failures": result["failures"],
-                "unresolved_failure_units": result["unresolved_failure_units"],
+                "models": {
+                    name: {
+                        "status": value["status"],
+                        "output_root": value["output_root"],
+                    }
+                    for name, value in result["models"].items()
+                },
             },
             ensure_ascii=False,
         ),

@@ -1,6 +1,82 @@
 import json
+import threading
 
 from bio_geo_tagging.run_tagging_pipeline import run_pipeline
+
+
+def test_pipeline_runs_two_models_in_parallel_from_shared_candidates(tmp_path):
+    input_path = tmp_path / "questions.jsonl"
+    labels_path = tmp_path / "labels.jsonl"
+    index_dir = tmp_path / "index"
+    region_index_dir = tmp_path / "region-index"
+    run_dir = tmp_path / "run"
+    input_path.write_text('{"question_id":"q1","stem":"题干"}\n', encoding="utf-8")
+    labels_path.write_text('{"label_path":"知识点@甲"}\n', encoding="utf-8")
+    index_dir.mkdir()
+    region_index_dir.mkdir()
+    (index_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
+    (region_index_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
+    barrier = threading.Barrier(2)
+    calls = {"retrieval": 0, "models": []}
+
+    def units(input_file, output_file, log_file):
+        with open(output_file, "w", encoding="utf-8") as handle:
+            handle.write('{"question_id":"q1","input_role":"root"}\n')
+
+    def retrieval(**kwargs):
+        calls["retrieval"] += 1
+        kwargs["output_path"].write_text(
+            '{"question_id":"q1","combined_candidates":[]}\n',
+            encoding="utf-8",
+        )
+        kwargs["summary_path"].write_text("{}\n", encoding="utf-8")
+        return {}
+
+    def adjudication(*args, **kwargs):
+        calls["models"].append(kwargs["model"])
+        assert kwargs["temperature"] == 0.0
+        assert kwargs["enable_vision"] is False
+        barrier.wait(timeout=2)
+        run_path = args[3]
+        run_path.mkdir(parents=True, exist_ok=True)
+        (run_path / "evidence.jsonl").write_text("", encoding="utf-8")
+        return {"input": 1, "success": 1, "error": 0}
+
+    def evaluation(
+        run_path,
+        candidates_path,
+        taxonomy_path,
+        output_path,
+        details_path,
+        stability_run_dir,
+        final_labels_path,
+    ):
+        output_path.write_text("{}\n", encoding="utf-8")
+        details_path.write_text("", encoding="utf-8")
+        final_labels_path.write_text("", encoding="utf-8")
+        return {}
+
+    result = run_pipeline(
+        input_path=input_path,
+        labels_path=labels_path,
+        index_dir=index_dir,
+        region_index_dir=region_index_dir,
+        run_dir=run_dir,
+        client=object(),
+        model="deepseek-test",
+        qwen_client=object(),
+        qwen_model="qwen-test",
+        unit_runner=units,
+        retrieval_runner=retrieval,
+        adjudication_runner=adjudication,
+        evaluation_runner=evaluation,
+    )
+
+    assert calls["retrieval"] == 1
+    assert sorted(calls["models"]) == ["deepseek-test", "qwen-test"]
+    assert result["status"] == "completed"
+    assert result["models"]["deepseek"]["output_root"] == str(run_dir / "deepseek")
+    assert result["models"]["qwen"]["output_root"] == str(run_dir / "qwen")
 
 
 def test_pipeline_connects_stages_writes_final_labels_and_resumes(tmp_path):
