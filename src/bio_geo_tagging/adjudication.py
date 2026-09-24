@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from bio_geo_tagging.ds import DSRequestError, append_evidence, parse_json_content
+from bio_geo_tagging.hybrid_candidate_retrieval import (
+    is_strict_comprehensive_label_path,
+)
 
 
 PROMPT_VERSION = "geography-candidate-adjudication-v1.5-complete-units"
@@ -249,7 +252,7 @@ class CandidateIndex:
 
 
 def _is_comprehensive_label(label: dict[str, str]) -> bool:
-    return "综合" in label["label_name"]
+    return is_strict_comprehensive_label_path(label["label_path"])
 
 
 def _is_comprehensive_candidate(

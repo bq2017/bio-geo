@@ -269,6 +269,27 @@ def test_subquestions_include_region_candidates_and_reserve_comprehensive_candid
     assert [item["label_id"] for item in whole] == ["知识点@交通综合"]
 
 
+def test_non_umbrella_comprehensive_name_remains_a_subquestion_candidate():
+    label_id = "知识点@区域发展@区域发展@生态脆弱区的综合治理"
+    labels = {
+        label_id: {
+            "label_name": "生态脆弱区的综合治理",
+            "label_path": label_id,
+        }
+    }
+    candidates = [{"label_id": label_id}]
+
+    subquestion = candidates_for_unit(
+        {"input_role": "subquestion"}, candidates, labels
+    )
+    whole = candidates_for_unit(
+        {"input_role": "whole_question_comprehensive"}, candidates, labels
+    )
+
+    assert subquestion == candidates
+    assert whole == []
+
+
 def test_build_prompt_maps_geography_fields_and_detects_missing_image():
     unit = {
         "question_id": "child-1",
