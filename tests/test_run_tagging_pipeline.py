@@ -16,6 +16,7 @@ def test_pipeline_connects_stages_writes_final_labels_and_resumes(tmp_path):
     (index_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
     (region_index_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
     calls = {"units": 0, "retrieval": 0, "adjudication": 0, "evaluation": 0}
+    adjudication_options = {}
 
     def unit_runner(input_file, output_file, log_file):
         calls["units"] += 1
@@ -36,6 +37,7 @@ def test_pipeline_connects_stages_writes_final_labels_and_resumes(tmp_path):
 
     def adjudication_runner(*args, **kwargs):
         calls["adjudication"] += 1
+        adjudication_options.update(kwargs)
         return {"input": 1, "success": 1, "error": 0}
 
     def evaluation_runner(
@@ -66,6 +68,8 @@ def test_pipeline_connects_stages_writes_final_labels_and_resumes(tmp_path):
         "run_dir": run_dir,
         "client": object(),
         "model": "test-model",
+        "temperature": 0.0,
+        "enable_vision": True,
         "unit_runner": unit_runner,
         "retrieval_runner": retrieval_runner,
         "adjudication_runner": adjudication_runner,
@@ -74,6 +78,8 @@ def test_pipeline_connects_stages_writes_final_labels_and_resumes(tmp_path):
     result = run_pipeline(**arguments)
 
     assert calls == {"units": 1, "retrieval": 1, "adjudication": 1, "evaluation": 1}
+    assert adjudication_options["temperature"] == 0.0
+    assert adjudication_options["enable_vision"] is True
     assert result["final_labels"] == str(run_dir / "final_labels.jsonl")
     final_row = json.loads((run_dir / "final_labels.jsonl").read_text(encoding="utf-8"))
     assert final_row["final_labels"] == ["知识点@旧", "知识点@甲"]

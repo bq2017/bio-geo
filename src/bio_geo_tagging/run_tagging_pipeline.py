@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import os
@@ -125,6 +126,16 @@ def _ensure_manifest(path: Path, expected: dict[str, Any]) -> None:
     _write_json(path, expected)
 
 
+def _release_retrieval_cuda_memory(device: str | None) -> None:
+    if not device or not device.lower().startswith("cuda"):
+        return
+    gc.collect()
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def run_pipeline(
     *,
     input_path: Path,
@@ -147,6 +158,8 @@ def run_pipeline(
     workers: int = 1,
     max_tokens: int = 1024,
     enable_thinking: bool | None = None,
+    temperature: float = 0.0,
+    enable_vision: bool = False,
     unit_runner: Callable[..., Any] = process_file,
     retrieval_runner: Callable[..., dict[str, Any]] = run_retrieval,
     adjudication_runner: Callable[..., dict[str, Any]] = run_adjudication,
@@ -222,6 +235,8 @@ def run_pipeline(
             "workers": workers,
             "max_tokens": max_tokens,
             "enable_thinking": enable_thinking,
+            "temperature": temperature,
+            "vision_enabled": enable_vision,
         },
     }
     _ensure_manifest(run_dir / "pipeline_manifest.json", manifest)
@@ -271,6 +286,7 @@ def run_pipeline(
             ):
                 raise RuntimeError("candidate retrieval produced incomplete outputs")
             _emit(log_path, "candidate_retrieval", "completed", output=str(candidates_path))
+            _release_retrieval_cuda_memory(device)
 
         _emit(log_path, "candidate_adjudication", "started")
         adjudication_report = adjudication_runner(
@@ -285,6 +301,8 @@ def run_pipeline(
             workers=workers,
             audited_exclusions_path=audited_exclusions_path,
             enable_thinking=enable_thinking,
+            temperature=temperature,
+            enable_vision=enable_vision,
         )
         adjudication_incomplete = bool(
             adjudication_report.get("error")
@@ -389,6 +407,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--retry-delay", type=float, default=1.0)
     parser.add_argument("--request-interval", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, default=1024)
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--enable-vision", action="store_true")
     thinking = parser.add_mutually_exclusive_group()
     thinking.add_argument("--enable-thinking", dest="enable_thinking", action="store_true")
     thinking.add_argument("--disable-thinking", dest="enable_thinking", action="store_false")
@@ -415,8 +435,10 @@ def main() -> int:
         value = getattr(args, name)
         if value is not None and value < 1:
             raise SystemExit(f"--{name.replace('_', '-')} must be positive")
-    if args.retry_delay < 0 or args.request_interval < 0:
-        raise SystemExit("retry delay and request interval must be non-negative")
+    if args.retry_delay < 0 or args.request_interval < 0 or args.temperature < 0:
+        raise SystemExit(
+            "retry delay, request interval, and temperature must be non-negative"
+        )
 
     client = DSClient(
         endpoints,
@@ -426,6 +448,7 @@ def main() -> int:
         retry_delay=args.retry_delay,
         request_interval=args.request_interval,
         enable_thinking=args.enable_thinking,
+        temperature=args.temperature,
     )
     try:
         result = run_pipeline(
@@ -449,6 +472,8 @@ def main() -> int:
             workers=args.workers,
             max_tokens=args.max_tokens,
             enable_thinking=args.enable_thinking,
+            temperature=args.temperature,
+            enable_vision=args.enable_vision,
         )
     except Exception as exc:
         print(f"FATAL: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)

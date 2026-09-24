@@ -164,6 +164,7 @@ PYTHONPATH=src .venv/bin/python -m bio_geo_tagging.run_tagging_pipeline \
   --retries 3 \
   --retry-delay 1 \
   --request-interval 0 \
+  --temperature 0 \
   --max-tokens 512
 ```
 
@@ -197,6 +198,12 @@ geography-full-pipeline-v1/
 统一入口不会把召回文件中的`knw_labels`或评测字段发送给DS。原来的阶段一、阶段二
 独立命令继续保留，用于单独调试。
 
+使用Qwen多模态模型运行统一流水线时，将`--model`改为
+`qwen3.8-27b-fp8`并增加`--enable-vision --temperature 0`。只有题干、选项或小题中
+明确出现“读图”“如图”“图示”等图片指示语时，阶段二才会发送已关联的图片；阶段一
+BM25/BGE仍只读取文本。阶段一使用CUDA时，候选召回完成后会释放BGE的CUDA缓存，
+再进入阶段二。
+
 ## 第二阶段：候选标签精排
 
 第二阶段从第一阶段候选中选择当前题目或当前小题直接考查的知识点。精排程序兼容：
@@ -214,10 +221,10 @@ geography-full-pipeline-v1/
 建议正式运行前为全部标签补齐相邻标签边界。
 
 整题召回结果可以直接用于小题精排：程序优先按小题查找候选，找不到时按
-`root_question_id` 复用整题候选。DS请求不会提交图片或图片URL；如果上游已有可靠的
-文字图片描述，重新生成打标单元后会通过 `context_image_description` 传给小题。
-题目明确依赖图片但没有文字描述时，Prompt会要求模型标记
-`context_insufficient=true`，不得根据答案或解析猜测图片内容。
+`root_question_id`复用整题候选。未开启`--enable-vision`时不会提交图片或图片URL；
+开启后，也只对明确引用图片的题目发送已关联图片。题目明确依赖图片但既没有可用图片
+也没有可靠文字描述时，Prompt会要求模型标记`context_insufficient=true`，不得根据
+答案或解析猜测图片内容。
 
 召回文件只作为候选索引，不作为题目正文输入。程序仅提取记录的
 `question_id`/`parent_id`和`combined_candidates[].label_path`，不会读取或发送
