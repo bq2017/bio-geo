@@ -1,7 +1,5 @@
 import json
 
-import pytest
-
 from bio_geo_tagging.run_tagging_pipeline import run_pipeline
 
 
@@ -87,7 +85,7 @@ def test_pipeline_connects_stages_writes_final_labels_and_resumes(tmp_path):
     assert '"stage": "candidate_retrieval", "status": "skipped"' in log_text
 
 
-def test_pipeline_stops_before_diagnostics_when_adjudication_is_incomplete(tmp_path):
+def test_pipeline_continues_diagnostics_when_adjudication_is_incomplete(tmp_path):
     input_path = tmp_path / "questions.jsonl"
     labels_path = tmp_path / "labels.jsonl"
     index_dir = tmp_path / "index"
@@ -111,29 +109,63 @@ def test_pipeline_stops_before_diagnostics_when_adjudication_is_incomplete(tmp_p
         return {}
 
     def incomplete(*args, **kwargs):
+        run_path = args[3]
+        run_path.mkdir(parents=True, exist_ok=True)
+        (run_path / "evidence.jsonl").write_text(
+            '{"unit_key":"q2|q2|root","root_question_id":"q2",'
+            '"question_id":"q2","input_role":"root",'
+            '"error":"DSRequestError: timeout","endpoint":"test"}\n',
+            encoding="utf-8",
+        )
         return {"input": 2, "success": 1, "error": 1}
 
     def evaluation(*args, **kwargs):
         nonlocal evaluation_called
         evaluation_called = True
-        return {}
+        output_path = args[3]
+        details_path = args[4]
+        final_labels_path = args[6]
+        output_path.write_text("{}\n", encoding="utf-8")
+        details_path.write_text("", encoding="utf-8")
+        final_labels_path.write_text("", encoding="utf-8")
+        return {"completed_question_predictions": 1}
 
-    with pytest.raises(RuntimeError, match="rerun the same command to resume"):
-        run_pipeline(
-            input_path=input_path,
-            labels_path=labels_path,
-            index_dir=index_dir,
-            region_index_dir=region_index_dir,
-            run_dir=run_dir,
-            client=object(),
-            model="test-model",
-            unit_runner=units,
-            retrieval_runner=retrieval,
-            adjudication_runner=incomplete,
-            evaluation_runner=evaluation,
-        )
-
-    assert evaluation_called is False
-    assert '"status": "traceback"' in (run_dir / "pipeline.log").read_text(
-        encoding="utf-8"
+    result = run_pipeline(
+        input_path=input_path,
+        labels_path=labels_path,
+        index_dir=index_dir,
+        region_index_dir=region_index_dir,
+        run_dir=run_dir,
+        client=object(),
+        model="test-model",
+        unit_runner=units,
+        retrieval_runner=retrieval,
+        adjudication_runner=incomplete,
+        evaluation_runner=evaluation,
     )
+
+    assert evaluation_called is True
+    assert result["status"] == "completed_with_errors"
+    assert result["unresolved_failure_units"] == 1
+    failures = [
+        json.loads(line)
+        for line in (run_dir / "pipeline-failures.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert failures == [
+        {
+            "attempts": None,
+            "created_at": None,
+            "endpoint": "test",
+            "error": "DSRequestError: timeout",
+            "input_role": "root",
+            "question_id": "q2",
+            "retry_errors": [],
+            "root_question_id": "q2",
+            "stage": "candidate_adjudication",
+            "unit_key": "q2|q2|root",
+        }
+    ]
+    log_text = (run_dir / "pipeline.log").read_text(encoding="utf-8")
+    assert '"status": "completed_with_errors"' in log_text

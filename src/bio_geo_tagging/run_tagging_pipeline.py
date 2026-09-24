@@ -40,6 +40,56 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _write_unresolved_adjudication_failures(
+    evidence_path: Path,
+    output_path: Path,
+) -> int:
+    """Write the latest unresolved error for every adjudication unit."""
+    latest_by_unit: dict[str, dict[str, Any]] = {}
+    if evidence_path.is_file():
+        with evidence_path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"invalid adjudication evidence JSON at line {line_number}"
+                    ) from exc
+                unit_key = str(record.get("unit_key") or "").strip()
+                if unit_key:
+                    latest_by_unit[unit_key] = record
+
+    failures: list[dict[str, Any]] = []
+    for unit_key, record in latest_by_unit.items():
+        error = record.get("error")
+        if not error:
+            continue
+        failures.append(
+            {
+                "stage": "candidate_adjudication",
+                "unit_key": unit_key,
+                "root_question_id": record.get("root_question_id"),
+                "question_id": record.get("question_id"),
+                "input_role": record.get("input_role"),
+                "error": error,
+                "endpoint": record.get("endpoint"),
+                "attempts": record.get("attempts"),
+                "retry_errors": record.get("retry_errors") or [],
+                "created_at": record.get("created_at"),
+            }
+        )
+    failures.sort(key=lambda item: item["unit_key"])
+
+    temporary = output_path.with_name(f".{output_path.name}.tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+        for failure in failures:
+            handle.write(json.dumps(failure, ensure_ascii=False, sort_keys=True) + "\n")
+    temporary.replace(output_path)
+    return len(failures)
+
+
 def _emit(log_path: Path, stage: str, status: str, **details: Any) -> None:
     record = {
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -134,6 +184,7 @@ def run_pipeline(
     evaluation_path = run_dir / "evaluation.json"
     evaluation_details_path = run_dir / "evaluation_details.jsonl"
     final_labels_path = run_dir / "final_labels.jsonl"
+    failures_path = run_dir / "pipeline-failures.jsonl"
 
     manifest = {
         "pipeline_version": "geography-tagging-pipeline-v1",
@@ -235,18 +286,20 @@ def run_pipeline(
             audited_exclusions_path=audited_exclusions_path,
             enable_thinking=enable_thinking,
         )
-        if (
+        adjudication_incomplete = bool(
             adjudication_report.get("error")
             or adjudication_report.get("success") != adjudication_report.get("input")
-        ):
-            raise RuntimeError(
-                "candidate adjudication incomplete; rerun the same command to resume"
-            )
+        )
+        unresolved_failure_units = _write_unresolved_adjudication_failures(
+            adjudication_dir / "evidence.jsonl",
+            failures_path,
+        )
         _emit(
             log_path,
             "candidate_adjudication",
-            "completed",
+            "completed_with_errors" if adjudication_incomplete else "completed",
             output=str(adjudication_dir),
+            unresolved_failure_units=unresolved_failure_units,
         )
 
         _emit(log_path, "automatic_diagnostics", "started")
@@ -259,7 +312,7 @@ def run_pipeline(
             None,
             final_labels_path,
         )
-        if not _is_nonempty_file(final_labels_path):
+        if not final_labels_path.is_file():
             raise RuntimeError("automatic diagnostics produced no final labels")
         _emit(
             log_path,
@@ -285,17 +338,29 @@ def run_pipeline(
         raise
 
     result = {
+        "status": (
+            "completed_with_errors" if adjudication_incomplete else "completed"
+        ),
         "run_dir": str(run_dir),
         "units": str(units_path),
         "candidates": str(candidates_path),
         "adjudication_dir": str(adjudication_dir),
         "evaluation": str(evaluation_path),
         "final_labels": str(final_labels_path),
+        "failures": str(failures_path),
+        "unresolved_failure_units": unresolved_failure_units,
         "adjudication": adjudication_report,
         "diagnostics": diagnostics,
     }
     _write_json(run_dir / "pipeline_report.json", result)
-    _emit(log_path, "pipeline", "completed", final_labels=str(final_labels_path))
+    _emit(
+        log_path,
+        "pipeline",
+        result["status"],
+        final_labels=str(final_labels_path),
+        failures=str(failures_path),
+        unresolved_failure_units=unresolved_failure_units,
+    )
     return result
 
 
@@ -391,9 +456,11 @@ def main() -> int:
     print(
         json.dumps(
             {
-                "status": "completed",
+                "status": result["status"],
                 "run_dir": result["run_dir"],
                 "final_labels": result["final_labels"],
+                "failures": result["failures"],
+                "unresolved_failure_units": result["unresolved_failure_units"],
             },
             ensure_ascii=False,
         ),
