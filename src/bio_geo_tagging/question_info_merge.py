@@ -114,10 +114,10 @@ def post_process_text(text: Optional[str]) -> Optional[str]:
     return text.strip()
 
 
-def clean_question_info(question_info: Dict[str, Any]) -> Dict[str, str]:
-    """Clean stem, options, and analysis in a question_info object."""
+def clean_question_info(question_info: Dict[str, Any]) -> Dict[str, Any]:
+    """Clean question text while preserving the source answer."""
     if not question_info or not isinstance(question_info, dict):
-        return {"stem": "", "options": "", "analysis": ""}
+        return {"stem": "", "options": "", "answer": "", "analysis": ""}
 
     cleaned_stem = post_process_text(normalize_text(question_info.get("stem")))
     cleaned_analysis = post_process_text(normalize_text(question_info.get("analysis")))
@@ -126,6 +126,7 @@ def clean_question_info(question_info: Dict[str, Any]) -> Dict[str, str]:
     return {
         "stem": cleaned_stem,
         "options": formatted_options,
+        "answer": question_info.get("answer") or "",
         "analysis": cleaned_analysis,
     }
 
@@ -242,6 +243,7 @@ def process_file(
                             "question_id": question_id,
                             "stem": cleaned_current["stem"],
                             "options": cleaned_current["options"],
+                            "answer": cleaned_current["answer"],
                             "analysis": cleaned_current["analysis"],
                             "structure_type": structure_type,
                             "answered_count": answered_count,
@@ -254,6 +256,9 @@ def process_file(
                         parent_questions[group_key]["stem"] = cleaned_current["stem"]
                         parent_questions[group_key]["options"] = cleaned_current[
                             "options"
+                        ]
+                        parent_questions[group_key]["answer"] = cleaned_current[
+                            "answer"
                         ]
                         parent_questions[group_key]["analysis"] = cleaned_current[
                             "analysis"
@@ -307,6 +312,7 @@ def process_file(
                             cleaned_parent = {
                                 "stem": "",
                                 "options": "",
+                                "answer": "",
                                 "analysis": "",
                             }
                             parent_structure_type = structure_type
@@ -320,6 +326,7 @@ def process_file(
                             "question_id": parent_id,
                             "stem": cleaned_parent["stem"],
                             "options": cleaned_parent["options"],
+                            "answer": cleaned_parent["answer"],
                             "analysis": cleaned_parent["analysis"],
                             "structure_type": parent_structure_type,
                             "answered_count": parent_answered_count,
@@ -335,6 +342,7 @@ def process_file(
                             "question_id": question_id,
                             "stem": cleaned_current["stem"],
                             "options": cleaned_current["options"],
+                            "answer": cleaned_current["answer"],
                             "analysis": cleaned_current["analysis"],
                             "knw_labels": current_knw_labels,
                         }

@@ -32,6 +32,7 @@ def test_process_file_cleans_and_merges_questions(tmp_path):
             "question_info": {
                 "stem": "大题<br><img src=\"image.png\">",
                 "options": [],
+                "answer": "",
                 "analysis": "",
             },
         },
@@ -49,6 +50,7 @@ def test_process_file_cleans_and_merges_questions(tmp_path):
                     {"title": "A", "htmlCode": "选项一<br>"},
                     {"title": "B", "htmlCode": "选项二"},
                 ],
+                "answer": "B",
                 "analysis": "解析<br>",
             },
         },
@@ -75,6 +77,7 @@ def test_process_file_cleans_and_merges_questions(tmp_path):
             "question_id": "parent-1",
             "stem": "大题",
             "options": "",
+            "answer": "",
             "analysis": "",
             "structure_type": "fuhe",
             "answered_count": "10",
@@ -87,6 +90,7 @@ def test_process_file_cleans_and_merges_questions(tmp_path):
                     "question_id": "child-1",
                     "stem": "小题( )",
                     "options": "A. 选项一\nB. 选项二",
+                    "answer": "B",
                     "analysis": "解析",
                     "knw_labels": ["知识点@小题标签"],
                 }
